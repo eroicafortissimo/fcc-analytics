@@ -56,11 +56,14 @@ class ListFilters(BaseModel):
 
 class TestCaseType(BaseModel):
     type_id: str
+    theme: str
+    category: str
     type_name: str
     description: str
     applicable_entity_types: list[str]
     applicable_min_tokens: int = 1
     applicable_min_name_length: int = 1
+    expected_outcome: str
     variation_logic: str
 
 

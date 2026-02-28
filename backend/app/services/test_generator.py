@@ -216,6 +216,8 @@ def load_test_case_types() -> list[TestCaseType]:
             try:
                 types.append(TestCaseType(
                     type_id=row['type_id'],
+                    theme=row.get('theme', ''),
+                    category=row.get('category', ''),
                     type_name=row['type_name'],
                     description=row['description'],
                     applicable_entity_types=[
@@ -223,6 +225,7 @@ def load_test_case_types() -> list[TestCaseType]:
                     ],
                     applicable_min_tokens=int(row.get('applicable_min_tokens', 1)),
                     applicable_min_name_length=int(row.get('applicable_min_name_length', 1)),
+                    expected_outcome=row.get('expected_outcome', 'Should Hit'),
                     variation_logic=row['variation_logic'],
                 ))
             except (KeyError, ValueError):

@@ -10,6 +10,44 @@ from app.services.list_cleaner import get_entries_from_db, get_summary
 router = APIRouter()
 
 
+@router.post("/infer-nationalities")
+async def infer_nationalities(
+    watchlists: list[str] = Query(default=[]),
+    batch_size: int = Query(default=500, ge=1, le=5000),
+    llm_enabled: bool = Query(default=True),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """
+    Run the LangGraph 3-tier nationality inference on entries that lack a nationality.
+    Processes up to `batch_size` entries per call; call repeatedly to process the full list.
+    """
+    from app.services.nationality_chain import run_batch_inference
+    result = await run_batch_inference(
+        db=db,
+        watchlists=watchlists or None,
+        batch_size=batch_size,
+        llm_enabled=llm_enabled,
+    )
+    return result
+
+
+@router.get("/infer-nationalities/status")
+async def infer_nationalities_status(db: aiosqlite.Connection = Depends(get_db)):
+    """Show how many entries have nationality vs still pending inference."""
+    async with db.execute(
+        """SELECT
+               COUNT(*) AS total,
+               SUM(CASE WHEN nationality IS NOT NULL THEN 1 ELSE 0 END) AS inferred,
+               SUM(CASE WHEN nationality IS NULL     THEN 1 ELSE 0 END) AS pending,
+               SUM(CASE WHEN nationality_method = 'data_lookup' THEN 1 ELSE 0 END) AS via_data,
+               SUM(CASE WHEN nationality_method = 'heuristic'   THEN 1 ELSE 0 END) AS via_heuristic,
+               SUM(CASE WHEN nationality_method = 'llm'         THEN 1 ELSE 0 END) AS via_llm
+           FROM watchlist_entries"""
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row)
+
+
 @router.post("/download", response_model=list[DownloadStatus])
 async def trigger_download(
     watchlists: list[str] = Query(default=list(WATCHLIST_SOURCES.keys())),

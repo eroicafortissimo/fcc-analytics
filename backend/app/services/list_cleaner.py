@@ -172,7 +172,8 @@ async def clean_and_upsert(
 
 # ── Read Helpers ───────────────────────────────────────────────────────────────
 
-async def get_entries_from_db(filters: ListFilters, db: aiosqlite.Connection) -> dict:
+def _build_where(filters: ListFilters) -> tuple[str, list[Any]]:
+    """Return (WHERE clause string, params list) for the given filters."""
     conditions: list[str] = []
     params: list[Any] = []
 
@@ -200,8 +201,90 @@ async def get_entries_from_db(filters: ListFilters, db: aiosqlite.Connection) ->
         conditions.append("recently_modified = 1")
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    return where, params
 
-    # Total count
+
+async def get_chart_data(filters: ListFilters, db: aiosqlite.Connection) -> dict:
+    """Return all chart data for the current filter state."""
+    where, params = _build_where(filters)
+
+    async def query(sql: str, p: list = None) -> list:
+        async with db.execute(sql, p if p is not None else params) as cur:
+            return await cur.fetchall()
+
+    # By watchlist
+    rows = await query(
+        f"SELECT watchlist, COUNT(*) as count FROM watchlist_entries {where} GROUP BY watchlist ORDER BY count DESC"
+    )
+    by_watchlist = [{"name": r[0], "count": r[1]} for r in rows]
+
+    # By entity type
+    rows = await query(
+        f"SELECT entity_type, COUNT(*) as count FROM watchlist_entries {where} GROUP BY entity_type ORDER BY count DESC"
+    )
+    by_entity_type = [{"name": r[0], "value": r[1]} for r in rows]
+
+    # By nationality (top 20, excluding NULL/Unknown)
+    nat_where = where + (" AND " if where else "WHERE ") + "nationality IS NOT NULL AND nationality != 'Unknown'"
+    rows = await query(
+        f"SELECT nationality, COUNT(*) as count FROM watchlist_entries {nat_where} GROUP BY nationality ORDER BY count DESC LIMIT 20",
+        params,
+    )
+    by_nationality = [{"name": r[0], "count": r[1]} for r in rows]
+
+    # Name length histogram (bucketed)
+    length_buckets = [
+        ("1-5",   "name_length BETWEEN 1 AND 5"),
+        ("6-10",  "name_length BETWEEN 6 AND 10"),
+        ("11-15", "name_length BETWEEN 11 AND 15"),
+        ("16-20", "name_length BETWEEN 16 AND 20"),
+        ("21-30", "name_length BETWEEN 21 AND 30"),
+        ("31-40", "name_length BETWEEN 31 AND 40"),
+        ("41-50", "name_length BETWEEN 41 AND 50"),
+        ("51+",   "name_length > 50"),
+    ]
+    name_length_hist = []
+    for label, cond in length_buckets:
+        extra = f" AND {cond}" if where else f"WHERE {cond}"
+        rows = await query(
+            f"SELECT COUNT(*) FROM watchlist_entries {where}{extra}",
+            params,
+        )
+        name_length_hist.append({"bucket": label, "count": rows[0][0]})
+
+    # Token count histogram (1-10, then 11+)
+    token_hist = []
+    for t in range(1, 11):
+        extra = f" AND num_tokens = {t}" if where else f"WHERE num_tokens = {t}"
+        rows = await query(f"SELECT COUNT(*) FROM watchlist_entries {where}{extra}", params)
+        token_hist.append({"tokens": str(t), "count": rows[0][0]})
+    extra = f" AND num_tokens > 10" if where else "WHERE num_tokens > 10"
+    rows = await query(f"SELECT COUNT(*) FROM watchlist_entries {where}{extra}", params)
+    token_hist.append({"tokens": "11+", "count": rows[0][0]})
+
+    # Recently modified count
+    rm_extra = f" AND recently_modified = 1" if where else "WHERE recently_modified = 1"
+    rows = await query(f"SELECT COUNT(*) FROM watchlist_entries {where}{rm_extra}", params)
+    recently_modified_count = rows[0][0]
+
+    # Total
+    rows = await query(f"SELECT COUNT(*) FROM watchlist_entries {where}")
+    total = rows[0][0]
+
+    return {
+        "total": total,
+        "by_watchlist": by_watchlist,
+        "by_entity_type": by_entity_type,
+        "by_nationality": by_nationality,
+        "name_length_hist": name_length_hist,
+        "token_count_hist": token_hist,
+        "recently_modified_count": recently_modified_count,
+    }
+
+
+async def get_entries_from_db(filters: ListFilters, db: aiosqlite.Connection) -> dict:
+    where, params = _build_where(filters)
+
     count_sql = f"SELECT COUNT(*) FROM watchlist_entries {where}"
     async with db.execute(count_sql, params) as cur:
         total = (await cur.fetchone())[0]

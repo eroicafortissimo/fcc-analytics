@@ -5,7 +5,7 @@ import aiosqlite
 from app.db.database import get_db
 from app.models.schemas import WatchlistEntry, WatchlistSummary, DownloadStatus, ListFilters
 from app.services.list_downloader import download_all_lists, WATCHLIST_SOURCES
-from app.services.list_cleaner import get_entries_from_db, get_summary
+from app.services.list_cleaner import get_entries_from_db, get_summary, get_chart_data
 
 router = APIRouter()
 
@@ -89,6 +89,28 @@ async def get_entries(
 async def get_list_summary(db: aiosqlite.Connection = Depends(get_db)):
     """Aggregate counts for charts."""
     return await get_summary(db)
+
+
+@router.get("/chart-data")
+async def get_chart_data_endpoint(
+    watchlists: list[str] = Query(default=[]),
+    entity_types: list[str] = Query(default=[]),
+    nationalities: list[str] = Query(default=[]),
+    search: Optional[str] = Query(default=None),
+    recently_modified_only: bool = Query(default=False),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Return chart data aggregations that respect the current active filters."""
+    filters = ListFilters(
+        watchlists=watchlists,
+        entity_types=entity_types,
+        nationalities=nationalities,
+        search=search,
+        recently_modified_only=recently_modified_only,
+        page=1,
+        page_size=1,
+    )
+    return await get_chart_data(filters, db)
 
 
 @router.get("/filters")

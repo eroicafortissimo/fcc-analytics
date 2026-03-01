@@ -240,6 +240,206 @@ function OutcomeBadge({ expected, actual }) {
   return <span className="text-xs font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-700">FP</span>
 }
 
+// ── Miss Analysis Panel ────────────────────────────────────────────────────────
+
+const CATEGORY_COLOURS = {
+  'Exact match noise': '#F97316',
+  'Transliteration variant': '#8B5CF6',
+  'Abbreviation / initials': '#3B82F6',
+  'Token omission': '#EF4444',
+  'Token insertion': '#10B981',
+  'Token reorder / permutation': '#F59E0B',
+  'Legal form variant': '#6366F1',
+  'Special characters / spacing': '#EC4899',
+  'Script / encoding issue': '#0EA5E9',
+  'Deliberate obfuscation': '#DC2626',
+  'Threshold gap': '#84CC16',
+  'Other': '#94A3B8',
+}
+
+const CONF_COLOURS = { high: 'bg-emerald-100 text-emerald-700', medium: 'bg-amber-100 text-amber-700', low: 'bg-slate-100 text-slate-500' }
+
+function MissAnalysisPanel({ fnCount }) {
+  const [status, setStatus] = useState('idle') // idle | running | done | error
+  const [result, setResult] = useState(null)
+  const [savedLoading, setSavedLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const loadSaved = () => {
+    setSavedLoading(true)
+    resultsApi.getMissAnalyses()
+      .then(r => {
+        if (r.data.length > 0) {
+          // Rebuild a summary-like structure from saved analyses
+          const cats = {}
+          r.data.forEach(a => { cats[a.miss_category] = (cats[a.miss_category] || 0) + 1 })
+          setResult({
+            total_fns: fnCount,
+            analyzed: r.data.length,
+            categories: Object.fromEntries(Object.entries(cats).sort((a, b) => b[1] - a[1])),
+            top_recommendations: [...new Set(r.data.map(a => a.recommendation).filter(Boolean))].slice(0, 10),
+            cases: r.data,
+          })
+          setStatus('done')
+        }
+      })
+      .catch(() => {})
+      .finally(() => setSavedLoading(false))
+  }
+
+  const runAnalysis = async () => {
+    setStatus('running')
+    setError(null)
+    try {
+      const r = await resultsApi.analyzeMisses()
+      setResult(r.data)
+      setStatus('done')
+    } catch (e) {
+      setError(e?.response?.data?.detail || 'Analysis failed. Check that the API key is configured.')
+      setStatus('error')
+    }
+  }
+
+  const categoryEntries = result ? Object.entries(result.categories || {}) : []
+  const maxCount = categoryEntries.length ? Math.max(...categoryEntries.map(([, v]) => v)) : 1
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-5">
+      <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-800">Miss Analysis <span className="ml-1 text-rose-600">(AI-powered)</span></h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Claude Haiku analyzes each false negative and explains why the screening system missed it
+          </p>
+        </div>
+        <div className="flex gap-2">
+          {status === 'idle' && (
+            <button onClick={loadSaved} disabled={savedLoading}
+              className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+              {savedLoading ? 'Loading…' : 'Load saved'}
+            </button>
+          )}
+          <button onClick={runAnalysis} disabled={status === 'running' || fnCount === 0}
+            className={`px-4 py-1.5 text-xs rounded-lg font-medium disabled:opacity-50 transition-colors
+              ${status === 'running'
+                ? 'bg-slate-100 text-slate-500 cursor-not-allowed'
+                : 'bg-rose-600 text-white hover:bg-rose-700'}`}>
+            {status === 'running' ? '⏳ Analyzing…' : `▶ Analyze ${fnCount} FN${fnCount !== 1 ? 's' : ''}`}
+          </button>
+        </div>
+      </div>
+
+      {status === 'idle' && fnCount === 0 && (
+        <div className="p-6 text-center text-sm text-slate-400">No false negatives to analyze</div>
+      )}
+
+      {error && (
+        <div className="m-4 p-3 rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">{error}</div>
+      )}
+
+      {status === 'running' && (
+        <div className="p-8 flex flex-col items-center gap-3 text-sm text-slate-500">
+          <svg className="animate-spin h-7 w-7 text-rose-400" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+          </svg>
+          <span>Calling Claude Haiku on {fnCount} false negative{fnCount !== 1 ? 's' : ''}…</span>
+          <span className="text-xs text-slate-400">This may take 15–60 seconds depending on volume</span>
+        </div>
+      )}
+
+      {status === 'done' && result && (
+        <div className="p-4 space-y-5">
+          {/* Summary row */}
+          <div className="flex flex-wrap gap-3 text-sm">
+            <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-500 text-xs">FNs analyzed</span>
+              <div className="font-bold text-slate-800">{result.analyzed} / {result.total_fns}</div>
+            </div>
+            <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-500 text-xs">Miss categories</span>
+              <div className="font-bold text-slate-800">{categoryEntries.length}</div>
+            </div>
+          </div>
+
+          {/* Category distribution */}
+          {categoryEntries.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-slate-500 mb-2">Miss categories</p>
+              <div className="space-y-1.5">
+                {categoryEntries.map(([cat, count]) => (
+                  <div key={cat} className="flex items-center gap-2 text-xs">
+                    <div className="w-36 text-slate-600 flex-shrink-0 truncate" title={cat}>{cat}</div>
+                    <div className="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{
+                          width: `${Math.round(count / maxCount * 100)}%`,
+                          backgroundColor: CATEGORY_COLOURS[cat] || '#94A3B8',
+                        }}
+                      />
+                    </div>
+                    <div className="w-6 text-right font-mono font-medium text-slate-700">{count}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Top recommendations */}
+          {result.top_recommendations?.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-slate-500 mb-2">Top recommendations</p>
+              <ol className="space-y-1.5 list-decimal list-inside">
+                {result.top_recommendations.map((r, i) => (
+                  <li key={i} className="text-xs text-slate-700 leading-relaxed">{r}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+
+          {/* Case list */}
+          {result.cases?.length > 0 && (
+            <details>
+              <summary className="cursor-pointer text-xs text-blue-600 hover:underline select-none">
+                Show per-case analysis ({result.cases.length} cases)
+              </summary>
+              <div className="mt-3 space-y-2 max-h-96 overflow-y-auto pr-1">
+                {result.cases.map(c => (
+                  <div key={c.test_case_id} className="rounded-lg border border-slate-100 p-3 bg-slate-50 text-xs">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-mono text-[11px] text-slate-400">{c.test_case_id}</span>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                        style={{ backgroundColor: (CATEGORY_COLOURS[c.miss_category] || '#94A3B8') + '22', color: CATEGORY_COLOURS[c.miss_category] || '#64748B' }}>
+                        {c.miss_category}
+                      </span>
+                      {c.confidence && (
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${CONF_COLOURS[c.confidence] || ''}`}>
+                          {c.confidence}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-baseline gap-1.5 text-slate-600 mb-1">
+                      <span className="font-medium text-slate-800">{c.test_name}</span>
+                      <span className="text-slate-400">→</span>
+                      <span>{c.original_name}</span>
+                    </div>
+                    <p className="text-slate-600 mb-0.5">{c.explanation}</p>
+                    {c.recommendation && (
+                      <p className="text-blue-700 italic">💡 {c.recommendation}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function ResultsInterpreter() {
@@ -445,6 +645,9 @@ export default function ResultsInterpreter() {
               )}
             </div>
           </div>
+
+          {/* Miss Analysis */}
+          <MissAnalysisPanel fnCount={summary.fn} />
 
           {/* Results table */}
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">

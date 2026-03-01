@@ -30,4 +30,8 @@ export const resultsApi = {
   exportUrl: () => `${BASE}/export/excel`,
 
   templateUrl: () => `${BASE}/template`,
+
+  analyzeMisses: () => axios.post(`${BASE}/analyze-misses`),
+
+  getMissAnalyses: () => axios.get(`${BASE}/miss-analyses`),
 }

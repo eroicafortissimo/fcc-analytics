@@ -103,3 +103,10 @@ async def analyze_misses(db: aiosqlite.Connection = Depends(get_db)):
     """Run LangGraph miss analysis engine over all false negatives."""
     from app.services.miss_analyzer import run_miss_analysis
     return await run_miss_analysis(db)
+
+
+@router.get("/miss-analyses")
+async def get_miss_analyses(db: aiosqlite.Connection = Depends(get_db)):
+    """Return all previously saved miss analyses, newest first."""
+    from app.services.miss_analyzer import get_saved_analyses
+    return await get_saved_analyses(db)

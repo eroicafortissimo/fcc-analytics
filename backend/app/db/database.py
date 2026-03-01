@@ -110,5 +110,18 @@ async def init_db():
                 python_lambda TEXT NOT NULL,
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS miss_analyses (
+                test_case_id TEXT PRIMARY KEY,
+                test_name TEXT,
+                original_name TEXT,
+                test_case_type TEXT,
+                entity_type TEXT,
+                miss_category TEXT,
+                explanation TEXT,
+                recommendation TEXT,
+                confidence TEXT DEFAULT 'medium',
+                analyzed_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         await db.commit()

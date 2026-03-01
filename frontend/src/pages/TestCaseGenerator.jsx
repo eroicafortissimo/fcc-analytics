@@ -429,8 +429,25 @@ export default function TestCaseGenerator() {
 
   const setFilter = (key, val) => setTableFilter(f => ({ ...f, [key]: val }))
 
-  // ── Export URL ────────────────────────────────────────────────────────────────
-  const exportUrl = testcasesApi.exportCsv({
+  // ── Export ────────────────────────────────────────────────────────────────────
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const exportRef = useRef(null)
+
+  useEffect(() => {
+    const handler = (e) => { if (exportRef.current && !exportRef.current.contains(e.target)) setExportMenuOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const exportFormats = [
+    { id: 'excel', label: 'Excel (.xlsx)', icon: '📊', desc: 'All columns + summary sheet' },
+    { id: 'csv', label: 'CSV', icon: '📄', desc: 'Plain text, all columns' },
+    { id: 'pacs008', label: 'pacs.008 (ZIP)', icon: '🏦', desc: 'ISO 20022 Customer Credit Transfer' },
+    { id: 'pacs009', label: 'pacs.009 (ZIP)', icon: '🏦', desc: 'ISO 20022 FI Credit Transfer' },
+    { id: 'fuf', label: 'FUF / MT103', icon: '📨', desc: 'SWIFT MT103 / Firco Universal Format' },
+  ]
+
+  const getExportUrl = (fmt) => testcasesApi.exportUrl(fmt, {
     expectedResult: tableFilter.expectedResult || undefined,
     entityType: tableFilter.entityType || undefined,
   })
@@ -449,12 +466,34 @@ export default function TestCaseGenerator() {
         <div className="flex gap-2">
           {stats?.total > 0 && (
             <>
-              <a
-                href={exportUrl}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50"
-              >
-                ↓ Export CSV
-              </a>
+              {/* Export format dropdown */}
+              <div className="relative" ref={exportRef}>
+                <button
+                  onClick={() => setExportMenuOpen(o => !o)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50"
+                >
+                  ↓ Export
+                  <span className="text-slate-400 text-xs">▾</span>
+                </button>
+                {exportMenuOpen && (
+                  <div className="absolute right-0 mt-1 w-64 bg-white border border-slate-200 rounded-xl shadow-lg z-20 overflow-hidden">
+                    {exportFormats.map(fmt => (
+                      <a
+                        key={fmt.id}
+                        href={getExportUrl(fmt.id)}
+                        onClick={() => setExportMenuOpen(false)}
+                        className="flex items-start gap-2 px-4 py-2.5 hover:bg-slate-50 transition-colors"
+                      >
+                        <span className="text-base mt-0.5 flex-shrink-0">{fmt.icon}</span>
+                        <div>
+                          <div className="text-sm font-medium text-slate-700">{fmt.label}</div>
+                          <div className="text-xs text-slate-400">{fmt.desc}</div>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button
                 onClick={handleClear}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-200 bg-white text-sm text-rose-600 hover:bg-rose-50"

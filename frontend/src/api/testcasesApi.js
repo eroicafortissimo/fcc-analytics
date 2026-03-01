@@ -21,11 +21,12 @@ export const testcasesApi = {
     return axios.get(`${BASE}/?${p}`)
   },
 
-  exportCsv: ({ expectedResult, entityType } = {}) => {
+  exportUrl: (format, { expectedResult, entityType } = {}) => {
     const p = new URLSearchParams()
     if (expectedResult) p.set('expected_result', expectedResult)
     if (entityType) p.set('entity_type', entityType)
-    return `${BASE}/export/csv?${p}`
+    const formatMap = { csv: 'csv', excel: 'excel', pacs008: 'pacs008', pacs009: 'pacs009', fuf: 'fuf' }
+    return `${BASE}/export/${formatMap[format] || 'csv'}?${p}`
   },
 
   chatMessage: (sessionId, content) =>

@@ -129,7 +129,7 @@ async def export_csv(
     entity_type: str = Query(default=None),
     db: aiosqlite.Connection = Depends(get_db),
 ):
-    """Export test cases as CSV (names-only format)."""
+    """Export test cases as CSV (quick plain-text format)."""
     conditions = []
     params: list = []
     if expected_result:
@@ -163,6 +163,70 @@ async def export_csv(
         io.BytesIO(output.getvalue().encode()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=test_cases.csv"},
+    )
+
+
+@router.get("/export/excel")
+async def export_excel(
+    expected_result: str = Query(default=None),
+    entity_type: str = Query(default=None),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Export test cases as formatted Excel workbook (names-only + summary)."""
+    from app.services.export_service import export_names_only
+    data = await export_names_only(db, expected_result or None, entity_type or None)
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=test_cases.xlsx"},
+    )
+
+
+@router.get("/export/pacs008")
+async def export_pacs008(
+    expected_result: str = Query(default=None),
+    entity_type: str = Query(default=None),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Export test cases as ISO 20022 pacs.008 XML (ZIP archive)."""
+    from app.services.export_service import export_pacs008 as _export
+    data = await _export(db, expected_result or None, entity_type or None)
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=pacs008_test_cases.zip"},
+    )
+
+
+@router.get("/export/pacs009")
+async def export_pacs009(
+    expected_result: str = Query(default=None),
+    entity_type: str = Query(default=None),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Export test cases as ISO 20022 pacs.009 XML (ZIP archive)."""
+    from app.services.export_service import export_pacs009 as _export
+    data = await _export(db, expected_result or None, entity_type or None)
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=pacs009_test_cases.zip"},
+    )
+
+
+@router.get("/export/fuf")
+async def export_fuf(
+    expected_result: str = Query(default=None),
+    entity_type: str = Query(default=None),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """Export test cases as FUF/SWIFT MT103 format (plain text)."""
+    from app.services.export_service import export_fuf as _export
+    data = await _export(db, expected_result or None, entity_type or None)
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="text/plain",
+        headers={"Content-Disposition": "attachment; filename=test_cases_fuf.txt"},
     )
 
 

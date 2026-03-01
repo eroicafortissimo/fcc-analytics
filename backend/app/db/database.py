@@ -85,5 +85,30 @@ async def init_db():
                 miss_explanation TEXT,
                 uploaded_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS chatbot_sessions (
+                session_id TEXT PRIMARY KEY,
+                stage TEXT DEFAULT 'new',
+                proposed_type TEXT,
+                examples TEXT DEFAULT '[]',
+                iteration INTEGER DEFAULT 0,
+                messages TEXT DEFAULT '[]',
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS custom_test_types (
+                type_id TEXT PRIMARY KEY,
+                theme TEXT DEFAULT 'Custom',
+                category TEXT DEFAULT 'User-Defined',
+                type_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                applicable_entity_types TEXT NOT NULL,
+                applicable_min_tokens INTEGER DEFAULT 1,
+                applicable_min_name_length INTEGER DEFAULT 1,
+                expected_outcome TEXT DEFAULT 'Should Hit',
+                variation_logic TEXT NOT NULL,
+                python_lambda TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         await db.commit()

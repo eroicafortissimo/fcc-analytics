@@ -840,6 +840,60 @@ VARIATION_FUNCTIONS: dict[str, Callable] = {
 }
 
 
+# ── Custom type support ────────────────────────────────────────────────────────
+
+async def load_custom_types(db: aiosqlite.Connection) -> list[TestCaseType]:
+    """Load user-created types from the custom_test_types DB table."""
+    try:
+        async with db.execute(
+            """SELECT type_id, theme, category, type_name, description,
+                      applicable_entity_types, applicable_min_tokens, applicable_min_name_length,
+                      expected_outcome, variation_logic
+               FROM custom_test_types ORDER BY created_at"""
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            TestCaseType(
+                type_id=r[0],
+                theme=r[1],
+                category=r[2],
+                type_name=r[3],
+                description=r[4],
+                applicable_entity_types=[e.strip() for e in (r[5] or 'individual').split('|')],
+                applicable_min_tokens=r[6] or 1,
+                applicable_min_name_length=r[7] or 1,
+                expected_outcome=r[8] or 'Should Hit',
+                variation_logic=r[9] or '',
+            )
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+async def get_custom_lambda(type_id: str, db: aiosqlite.Connection) -> Optional[str]:
+    """Return the python_lambda string for a custom type."""
+    try:
+        async with db.execute(
+            "SELECT python_lambda FROM custom_test_types WHERE type_id = ?", (type_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _make_lambda_fn(lambda_str: str):
+    """Compile a lambda string into a variation function matching the standard signature."""
+    from app.services.chatbot_agent import _safe_apply
+    def var_fn(name: str, record: dict, rng: random.Random):
+        result = _safe_apply(lambda_str, name, rng)
+        if result is None:
+            return None, "skip: lambda returned None"
+        return result, "custom lambda applied"
+    return var_fn
+
+
 # ── Sampling ───────────────────────────────────────────────────────────────────
 
 async def _sample_names(
@@ -905,12 +959,16 @@ async def _sample_names(
 
 async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connection) -> dict:
     """
-    Generate test cases for the requested type_ids.
+    Generate test cases for the requested type_ids (built-in and custom).
     Stores results in the test_cases table.
     Returns a summary dict.
     """
-    all_types = {t.type_id: t for t in load_test_case_types()}
-    meta_by_id = {tid: _get_type_meta(tid) for tid in request.type_ids}
+    # Merge built-in CSV types + custom DB types
+    builtin_types = {t.type_id: t for t in load_test_case_types()}
+    custom_types = {t.type_id: t for t in await load_custom_types(db)}
+    all_types = {**builtin_types, **custom_types}
+
+    meta_by_id = {tid: _get_type_meta(tid) for tid in request.type_ids if not tid.startswith('TC_CUSTOM_')}
 
     rng = random.Random()  # Seeded per-run for reproducibility within session
 
@@ -928,12 +986,23 @@ async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connecti
             continue
 
         type_def = all_types[type_id]
-        meta = meta_by_id.get(type_id, {})
-        expected_outcome = meta.get('expected_outcome', 'Should Hit')
+
+        # Resolve variation function: built-in dispatch table or custom lambda
+        if type_id.startswith('TC_CUSTOM_'):
+            lambda_str = await get_custom_lambda(type_id, db)
+            if not lambda_str:
+                continue
+            var_fn = _make_lambda_fn(lambda_str)
+            expected_outcome = type_def.expected_outcome
+            meta = {}
+        else:
+            var_fn = VARIATION_FUNCTIONS.get(type_id)
+            if var_fn is None:
+                continue
+            meta = meta_by_id.get(type_id, {})
+            expected_outcome = meta.get('expected_outcome', 'Should Hit')
+
         expected_result, rationale_prefix = outcome_to_result(expected_outcome)
-        var_fn = VARIATION_FUNCTIONS.get(type_id)
-        if var_fn is None:
-            continue
 
         # Sample candidate names
         candidates = await _sample_names(

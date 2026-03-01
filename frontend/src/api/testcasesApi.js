@@ -27,4 +27,7 @@ export const testcasesApi = {
     if (entityType) p.set('entity_type', entityType)
     return `${BASE}/export/csv?${p}`
   },
+
+  chatMessage: (sessionId, content) =>
+    axios.post(`${BASE}/chatbot/message`, { session_id: sessionId || null, content }),
 }

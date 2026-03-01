@@ -122,6 +122,165 @@ function ThemeGroup({ theme, types, selected, onToggle, onToggleAll }) {
   )
 }
 
+// ── Simple markdown renderer (bold + line breaks, no deps) ────────────────────
+
+function MdText({ text }) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g)
+  return (
+    <span>
+      {parts.map((p, i) =>
+        p.startsWith('**') && p.endsWith('**')
+          ? <strong key={i}>{p.slice(2, -2)}</strong>
+          : <span key={i}>{p}</span>
+      )}
+    </span>
+  )
+}
+
+function ChatMessage({ role, content }) {
+  const isAssistant = role === 'assistant'
+  return (
+    <div className={`flex ${isAssistant ? 'justify-start' : 'justify-end'} mb-3`}>
+      <div
+        className={`max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words ${
+          isAssistant
+            ? 'bg-slate-100 text-slate-800 rounded-tl-none'
+            : 'bg-blue-600 text-white rounded-tr-none'
+        }`}
+      >
+        {isAssistant
+          ? content.split('\n').map((line, i) => (
+              <div key={i}><MdText text={line} /></div>
+            ))
+          : content
+        }
+      </div>
+    </div>
+  )
+}
+
+function ChatbotPanel({ onTypeSaved }) {
+  const [open, setOpen] = useState(false)
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const [sessionId, setSessionId] = useState(null)
+  const messagesEndRef = useRef(null)
+
+  // Welcome message on first open
+  useEffect(() => {
+    if (open && messages.length === 0) {
+      setMessages([{
+        role: 'assistant',
+        content: 'Hello! Describe a new name variation type and I\'ll help you define it.\n\nExample: "Create a test where you take the first two letters of each token and join them with a dash."\n\nOnce confirmed, the new type will appear in the Variation Types panel.',
+      }])
+    }
+  }, [open])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  const send = async () => {
+    const content = input.trim()
+    if (!content || sending) return
+    setInput('')
+    setMessages(m => [...m, { role: 'user', content }])
+    setSending(true)
+    try {
+      const r = await testcasesApi.chatMessage(sessionId, content)
+      const data = r.data
+      setSessionId(data.session_id)
+      setMessages(m => [...m, { role: 'assistant', content: data.reply }])
+      if (data.saved_type_id) {
+        onTypeSaved(data.saved_type_id)
+      }
+    } catch (e) {
+      setMessages(m => [...m, {
+        role: 'assistant',
+        content: 'An error occurred. Make sure the backend is running and ANTHROPIC_API_KEY is set.',
+      }])
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const handleKey = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+  }
+
+  const reset = () => {
+    setMessages([])
+    setSessionId(null)
+    setInput('')
+  }
+
+  return (
+    <div className="mt-4 border border-slate-200 rounded-xl overflow-hidden bg-white">
+      {/* Header */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors"
+      >
+        <span className="text-lg">🤖</span>
+        <div className="flex-1 text-left">
+          <span className="text-sm font-semibold text-slate-700">New Type Assistant</span>
+          <span className="ml-2 text-xs text-slate-400">Describe a variation in plain English → auto-generates a test type</span>
+        </div>
+        <span className="text-slate-400 text-xs">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-100">
+          {/* Message history */}
+          <div className="p-4 overflow-y-auto" style={{ height: '320px' }}>
+            {messages.map((m, i) => <ChatMessage key={i} role={m.role} content={m.content} />)}
+            {sending && (
+              <div className="flex justify-start mb-3">
+                <div className="bg-slate-100 rounded-xl rounded-tl-none px-4 py-2.5 text-sm text-slate-500 flex items-center gap-2">
+                  <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                  </svg>
+                  Thinking…
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input */}
+          <div className="border-t border-slate-100 p-3 flex gap-2">
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKey}
+              placeholder="Describe your variation type… (Enter to send, Shift+Enter for new line)"
+              rows={2}
+              className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="flex flex-col gap-1.5">
+              <button
+                onClick={send}
+                disabled={!input.trim() || sending}
+                className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Send
+              </button>
+              <button
+                onClick={reset}
+                className="px-4 py-1.5 border border-slate-200 text-slate-500 text-xs rounded-lg hover:bg-slate-50"
+              >
+                Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function TestCaseGenerator() {
@@ -150,14 +309,31 @@ export default function TestCaseGenerator() {
   const [searchDraft, setSearchDraft] = useState('')
   const searchTimer = useRef(null)
 
-  // ── Load types on mount ──────────────────────────────────────────────────────
-  useEffect(() => {
+  // ── Load types (called on mount and after a custom type is saved) ───────────
+  const loadTypes = useCallback((autoSelectNew = null) => {
     testcasesApi.types().then(r => {
       setTypes(r.data)
-      // Default: all selected
+      setSelected(prev => {
+        // Preserve existing selections; auto-select new saved type if provided
+        const next = new Set(prev)
+        if (autoSelectNew) next.add(autoSelectNew)
+        return next
+      })
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    // On mount: load types and pre-select all
+    testcasesApi.types().then(r => {
+      setTypes(r.data)
       setSelected(new Set(r.data.map(t => t.type_id)))
     }).catch(() => {})
   }, [])
+
+  const onTypeSaved = useCallback((newTypeId) => {
+    // Reload types list and auto-select the new custom type
+    loadTypes(newTypeId)
+  }, [loadTypes])
 
   // ── Load stats ───────────────────────────────────────────────────────────────
   const refreshStats = useCallback(() => {
@@ -586,6 +762,9 @@ export default function TestCaseGenerator() {
           )}
         </div>
       </div>
+
+      {/* Chatbot panel */}
+      <ChatbotPanel onTypeSaved={onTypeSaved} />
     </div>
   )
 }

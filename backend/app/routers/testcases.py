@@ -11,10 +11,20 @@ router = APIRouter()
 
 
 @router.get("/types", response_model=list[TestCaseType])
-async def get_test_case_types():
-    """Return all pre-defined test case types from CSV."""
-    from app.services.test_generator import load_test_case_types
-    return load_test_case_types()
+async def get_test_case_types(db: aiosqlite.Connection = Depends(get_db)):
+    """Return all test case types: built-in (CSV) + custom (DB)."""
+    from app.services.test_generator import load_test_case_types, load_custom_types
+    builtin = load_test_case_types()
+    custom = await load_custom_types(db)
+    return builtin + custom
+
+
+@router.get("/chatbot/session/{session_id}")
+async def get_session(session_id: str, db: aiosqlite.Connection = Depends(get_db)):
+    """Return current chatbot session state."""
+    from app.services.chatbot_agent import _load_session
+    session = await _load_session(session_id, db)
+    return session
 
 
 @router.post("/generate", response_model=dict)

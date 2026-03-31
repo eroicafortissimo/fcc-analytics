@@ -144,7 +144,7 @@ function UploadZone({ onUpload }) {
           </>
         ) : (
           <>
-            <div className="text-4xl">📂</div>
+            <div className="text-slate-300 text-4xl font-light">↑</div>
             <p className="text-sm font-medium text-slate-600">Drop CSV or Excel file here</p>
             <p className="text-xs text-slate-400">or click to browse</p>
           </>
@@ -426,7 +426,7 @@ function MissAnalysisPanel({ fnCount }) {
                     </div>
                     <p className="text-slate-600 mb-0.5">{c.explanation}</p>
                     {c.recommendation && (
-                      <p className="text-blue-700 italic">💡 {c.recommendation}</p>
+                      <p className="text-blue-700 italic">{c.recommendation}</p>
                     )}
                   </div>
                 ))}
@@ -540,7 +540,7 @@ export default function ResultsInterpreter() {
                 <div className="absolute right-0 mt-1 w-52 bg-white border border-slate-200 rounded-xl shadow-lg z-20">
                   <a href={resultsApi.exportUrl()} onClick={() => setExportMenuOpen(false)}
                     className="flex items-center gap-2 px-4 py-2.5 hover:bg-slate-50 text-sm text-slate-700">
-                    📊 Excel workbook
+                    Excel workbook
                   </a>
                 </div>
               )}
@@ -553,14 +553,28 @@ export default function ResultsInterpreter() {
         )}
       </div>
 
-      {/* Upload success banner */}
+      {/* Upload result banner */}
       {uploadResult && (
-        <div className="mb-4 p-3 rounded-lg border border-emerald-200 bg-emerald-50 text-sm text-emerald-800 flex justify-between">
-          <span>
-            Uploaded <strong>{uploadResult.total_rows}</strong> rows — <strong>{uploadResult.matched}</strong> matched to test cases
-            {uploadResult.unmatched > 0 && `, ${uploadResult.unmatched} unmatched`}.
+        <div className={`mb-4 p-3 rounded-lg border text-sm flex justify-between items-start gap-3
+          ${uploadResult.matched === 0
+            ? 'border-amber-200 bg-amber-50 text-amber-800'
+            : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+          <span className="flex-1">
+            Uploaded <strong>{uploadResult.total_rows}</strong> row{uploadResult.total_rows !== 1 ? 's' : ''} —{' '}
+            <strong>{uploadResult.matched}</strong> matched to test cases
+            {uploadResult.matched_by_name > 0 && <span className="text-xs ml-1">({uploadResult.matched_by_name} by name)</span>}
+            {uploadResult.unmatched > 0 && `, ${uploadResult.unmatched} unmatched (ID not found)`}
+            {uploadResult.skipped_bad_result > 0 && `, ${uploadResult.skipped_bad_result} skipped (missing or invalid actual_result)`}
+            .
+            {uploadResult.matched === 0 && uploadResult.total_rows > 0 && (
+              <span className="block mt-1 text-xs font-medium">
+                {uploadResult.skipped_bad_result > 0
+                  ? 'Ensure your file has an actual_result column with HIT or MISS values.'
+                  : 'No test case IDs matched. Export your test cases first, add an actual_result column (HIT/MISS), then re-upload. Or include a test_name column matching the generated test names.'}
+              </span>
+            )}
           </span>
-          <button onClick={() => setUploadResult(null)} className="text-emerald-500 text-lg leading-none">×</button>
+          <button onClick={() => setUploadResult(null)} className={`text-lg leading-none flex-shrink-0 ${uploadResult.matched === 0 ? 'text-amber-400' : 'text-emerald-500'}`}>×</button>
         </div>
       )}
 

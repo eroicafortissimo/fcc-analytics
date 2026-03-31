@@ -14,6 +14,11 @@ All results are cached in the `nationality_cache` SQLite table.
 """
 from __future__ import annotations
 
+import sys as _sys
+_VENV_SITE = "/workspace/venv/lib/python3.11/site-packages"
+if _VENV_SITE not in _sys.path:
+    _sys.path.insert(0, _VENV_SITE)
+
 import os
 import re
 import unicodedata
@@ -491,6 +496,55 @@ async def infer_nationality(
     return {"nationality": nat, "confidence": conf, "method_used": method, "from_cache": False}
 
 
+async def infer_nationality_no_llm(
+    name: str,
+    record_context: dict,
+    db: aiosqlite.Connection,
+) -> dict | None:
+    """
+    Run only data_lookup + heuristic tiers (no LLM call).
+    Returns a result dict if resolved, or None if LLM is needed.
+    Checks and writes to cache for resolved results.
+    """
+    cache_key = _cache_key(name)
+
+    async with db.execute(
+        "SELECT nationality, confidence, method FROM nationality_cache WHERE name_key = ?",
+        (cache_key,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row:
+        return {"nationality": row[0], "confidence": row[1], "method_used": row[2], "from_cache": True}
+
+    state: dict = {
+        "name": name,
+        "record_context": record_context,
+        "nationality": None,
+        "confidence": None,
+        "method_used": None,
+    }
+    state = node_data_lookup(state)
+    if not (state.get("nationality") and state.get("confidence") in ("HIGH", "MEDIUM")):
+        state = node_heuristic(state)
+
+    if state.get("nationality") and state.get("confidence") in ("HIGH", "MEDIUM"):
+        nat, conf, method = state["nationality"], state["confidence"], state["method_used"]
+        await db.execute(
+            """INSERT INTO nationality_cache (name_key, nationality, confidence, method)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(name_key) DO UPDATE SET
+                 nationality = excluded.nationality,
+                 confidence  = excluded.confidence,
+                 method      = excluded.method,
+                 cached_at   = datetime('now')
+            """,
+            (cache_key, nat, conf, method),
+        )
+        return {"nationality": nat, "confidence": conf, "method_used": method, "from_cache": False}
+
+    return None  # Needs LLM
+
+
 async def run_batch_inference(
     db: aiosqlite.Connection,
     watchlists: list[str] | None = None,
@@ -498,10 +552,20 @@ async def run_batch_inference(
     llm_enabled: bool = True,
 ) -> dict:
     """
-    Run nationality inference on all entries that don't have a nationality yet.
+    Run nationality inference on entries that don't have a nationality yet.
+
+    Phase 1 (llm_enabled=False): processes unprocessed entries (nationality_method IS NULL)
+      via data_lookup + heuristic. Unresolvable entries are marked nationality_method='needs_llm'.
+    Phase 2 (llm_enabled=True): processes 'needs_llm' entries via the full LLM chain.
+
     Returns a summary of processed counts by method.
     """
-    conditions = ["nationality IS NULL"]
+    if llm_enabled:
+        nat_condition = "(nationality IS NULL AND nationality_method = 'needs_llm')"
+    else:
+        nat_condition = "(nationality IS NULL AND nationality_method IS NULL)"
+
+    conditions = [nat_condition]
     params: list = []
     if watchlists:
         placeholders = ", ".join("?" for _ in watchlists)
@@ -519,9 +583,9 @@ async def run_batch_inference(
     if not rows:
         return {"processed": 0, "by_method": {}}
 
-    counts: dict[str, int] = {"data_lookup": 0, "heuristic": 0, "llm": 0, "cached": 0}
+    counts: dict[str, int] = {}
 
-    for row in rows:
+    for i, row in enumerate(rows):
         uid, name, watchlist, sub_wl, entity_type, program = row
         ctx = {
             "watchlist": watchlist,
@@ -529,27 +593,47 @@ async def run_batch_inference(
             "entity_type": entity_type,
             "sanctions_program": program,
         }
-        try:
-            result = await infer_nationality(name, ctx, db)
-        except Exception as exc:
-            logger.warning(f"Inference failed for uid={uid}: {exc}")
-            result = {"nationality": "Unknown", "confidence": "LOW", "method_used": "heuristic"}
 
-        nat = result["nationality"]
-        conf = result["confidence"]
-        method = result["method_used"]
+        if llm_enabled:
+            try:
+                result = await infer_nationality(name, ctx, db)
+            except Exception as exc:
+                logger.warning(f"Inference failed for uid={uid}: {exc}")
+                result = {"nationality": "Unknown", "confidence": "LOW", "method_used": "llm"}
 
-        if result.get("from_cache"):
-            counts["cached"] = counts.get("cached", 0) + 1
+            nat, conf, method = result["nationality"], result["confidence"], result["method_used"]
+            counts["cached" if result.get("from_cache") else method] = (
+                counts.get("cached" if result.get("from_cache") else method, 0) + 1
+            )
+            await db.execute(
+                "UPDATE watchlist_entries SET nationality=?, nationality_confidence=?, nationality_method=? WHERE uid=?",
+                (nat, conf, method, uid),
+            )
         else:
-            counts[method] = counts.get(method, 0) + 1
+            try:
+                result = await infer_nationality_no_llm(name, ctx, db)
+            except Exception as exc:
+                logger.warning(f"Heuristic inference failed for uid={uid}: {exc}")
+                result = None
 
-        await db.execute(
-            """UPDATE watchlist_entries
-               SET nationality = ?, nationality_confidence = ?, nationality_method = ?
-               WHERE uid = ?""",
-            (nat, conf, method, uid),
-        )
+            if result is not None:
+                nat, conf, method = result["nationality"], result["confidence"], result["method_used"]
+                counts["cached" if result.get("from_cache") else method] = (
+                    counts.get("cached" if result.get("from_cache") else method, 0) + 1
+                )
+                await db.execute(
+                    "UPDATE watchlist_entries SET nationality=?, nationality_confidence=?, nationality_method=? WHERE uid=?",
+                    (nat, conf, method, uid),
+                )
+            else:
+                counts["needs_llm"] = counts.get("needs_llm", 0) + 1
+                await db.execute(
+                    "UPDATE watchlist_entries SET nationality_method='needs_llm' WHERE uid=?",
+                    (uid,),
+                )
+
+        if (i + 1) % 25 == 0:
+            await db.commit()
 
     await db.commit()
     return {"processed": len(rows), "by_method": counts}

@@ -15,3 +15,5 @@ anthropic==0.41.0
 unicodedata2==15.1.0
 python-multipart==0.0.20
 jellyfish==1.1.0
+apscheduler==3.10.4
+sqlalchemy[asyncio]==2.0.36

@@ -19,6 +19,14 @@ async def get_test_case_types(db: aiosqlite.Connection = Depends(get_db)):
     return builtin + custom
 
 
+@router.delete("/types/custom")
+async def delete_custom_types(db: aiosqlite.Connection = Depends(get_db)):
+    """Delete all user-created custom test case types."""
+    await db.execute("DELETE FROM custom_test_types")
+    await db.commit()
+    return {"deleted": True}
+
+
 @router.get("/chatbot/session/{session_id}")
 async def get_session(session_id: str, db: aiosqlite.Connection = Depends(get_db)):
     """Return current chatbot session state."""
@@ -67,6 +75,20 @@ async def get_stats(db: aiosqlite.Connection = Depends(get_db)):
     }
 
 
+@router.get("/table-types")
+async def get_table_types(db: aiosqlite.Connection = Depends(get_db)):
+    """Return distinct type_ids that are actually present in the test_cases table."""
+    import re
+    async with db.execute("SELECT DISTINCT test_case_type FROM test_cases") as cur:
+        rows = await cur.fetchall()
+    type_ids = set()
+    for (val,) in rows:
+        m = re.search(r'\(([^)]+)\)$', val or '')
+        if m:
+            type_ids.add(m.group(1))
+    return sorted(type_ids)
+
+
 @router.delete("/clear")
 async def clear_test_cases(db: aiosqlite.Connection = Depends(get_db)):
     """Delete all generated test cases."""
@@ -81,6 +103,8 @@ async def list_test_cases(
     page_size: int = Query(default=100, ge=1, le=500),
     expected_result: str = Query(default=None),
     entity_type: str = Query(default=None),
+    watchlist: str = Query(default=None),
+    type_id: str = Query(default=None),
     search: str = Query(default=None),
     db: aiosqlite.Connection = Depends(get_db),
 ):
@@ -94,6 +118,12 @@ async def list_test_cases(
     if entity_type:
         conditions.append("entity_type = ?")
         params.append(entity_type)
+    if watchlist:
+        conditions.append("watchlist = ?")
+        params.append(watchlist)
+    if type_id:
+        conditions.append("test_case_type LIKE ?")
+        params.append(f"%({type_id})")
     if search:
         conditions.append(
             "(cleaned_original_name LIKE ? OR test_name LIKE ? OR test_case_type LIKE ?)"

@@ -195,13 +195,13 @@ HOMOGLYPH_MAP: dict[str, str] = {
 
 def outcome_to_result(expected_outcome: str) -> tuple[str, str]:
     """Map matrix outcome label → (expected_result, rationale_prefix)"""
-    mapping = {
-        'Must Hit':        ('HIT', 'Must Hit — deterministic match; any miss is a critical system failure'),
-        'Should Hit':      ('HIT', 'Should Hit — standard capability; a miss indicates a configuration or threshold gap'),
-        'Testing Purposes':('HIT', 'Testing Purposes — capability benchmark; a miss is expected without the specific capability in place'),
-        'Should Not Hit':  ('MISS','Should Not Hit — expected non-match; a hit would be a false positive'),
+    rationales = {
+        'Must Hit':         'Must Hit — deterministic match; any miss is a critical system failure',
+        'Should Hit':       'Should Hit — standard capability; a miss indicates a configuration or threshold gap',
+        'Testing Purposes': 'Testing Purposes — capability benchmark; a miss is expected without the specific capability in place',
+        'Should Not Hit':   'Should Not Hit — expected non-match; a hit would be a false positive',
     }
-    return mapping.get(expected_outcome, ('HIT', expected_outcome))
+    return expected_outcome, rationales.get(expected_outcome, expected_outcome)
 
 
 # ── CSV loader ─────────────────────────────────────────────────────────────────
@@ -240,7 +240,8 @@ def _get_type_meta(type_id: str) -> dict:
         if TYPES_CSV.exists():
             with open(TYPES_CSV, newline='', encoding='utf-8') as f:
                 for row in csv.DictReader(f):
-                    _get_type_meta._cache[row['type_id']] = row
+                    if row['type_id'] not in _get_type_meta._cache:
+                        _get_type_meta._cache[row['type_id']] = row
     return _get_type_meta._cache.get(type_id, {})
 
 
@@ -283,6 +284,16 @@ def _keyboard_typo(char: str, rng: random.Random) -> str:
 
 def _v_exact_match(name, record, rng):
     return name, "exact string copy"
+
+def _v_primary_name_match(name, record, rng):
+    if record.get('primary_aka') != 'primary':
+        return None, "skip: not a primary name"
+    return name, "primary name exact copy"
+
+def _v_aka_match(name, record, rng):
+    if record.get('primary_aka') != 'aka':
+        return None, "skip: not an AKA name"
+    return name, "AKA exact copy"
 
 def _v_omit_article(name, record, rng):
     tokens = name.split()
@@ -776,10 +787,972 @@ def _v_period_short_name(name, record, rng):
     return ' '.join([dotted] + tokens[1:]), f"period-separated acronym: '{t}' → '{dotted}'"
 
 
+# ── Additional variation functions (TC059+) ────────────────────────────────────
+
+def _v_omit_all_articles(name, record, rng):
+    tokens = name.split()
+    new = [t for t in tokens if not _is_article(t)]
+    if len(new) == len(tokens):
+        return None, "skip: no article tokens found"
+    return ' '.join(new) if new else None, "all article tokens removed"
+
+def _v_omit_all_legal_designators(name, record, rng):
+    tokens = name.split()
+    new = [t for t in tokens if not _is_legal_designator(t)]
+    if len(new) == len(tokens) or not new:
+        return None, "skip: no legal designators or would produce empty name"
+    return ' '.join(new), "all legal designators removed"
+
+def _v_omit_surname(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: insufficient tokens"
+    return ' '.join(tokens[:-1]), f"last token '{tokens[-1]}' (surname) removed"
+
+def _v_omit_all_surnames_keep_first(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: insufficient tokens"
+    return tokens[0], "only first token retained"
+
+def _v_omit_multiple_segments(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 4:
+        return None, "skip: need at least 4 tokens"
+    interior = list(range(1, len(tokens) - 1))
+    if len(interior) < 2:
+        return None, "skip: insufficient interior tokens"
+    idxs = sorted(rng.sample(interior, 2), reverse=True)
+    new = tokens[:]
+    for i in idxs:
+        new.pop(i)
+    return ' '.join(new), f"segments at positions {idxs} removed"
+
+def _v_insert_multiple_articles(name, record, rng):
+    return f"The A {name}", "multiple articles 'The A' prepended"
+
+def _v_insert_legal_designator_front(name, record, rng):
+    d = rng.choice(['The', 'Joint', 'National', 'General'])
+    return f"{d} {name}", f"prefix '{d}' inserted at front"
+
+def _v_duplicate_legal_designator(name, record, rng):
+    tokens = name.split()
+    for i, t in enumerate(tokens):
+        if _is_legal_designator(t):
+            tokens.insert(i, t)
+            return ' '.join(tokens), f"designator '{t}' duplicated"
+    d = rng.choice(['LLC', 'Ltd', 'Corp'])
+    return f"{name} {d} {d}", f"designator '{d}' appended twice"
+
+def _v_insert_country_name(name, record, rng):
+    countries = ['Iran', 'Russia', 'Syria', 'China', 'Cuba', 'Venezuela', 'Belarus', 'Myanmar']
+    c = rng.choice(countries)
+    return f"{name} {c}", f"country name '{c}' appended"
+
+def _v_insert_middle_name(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: need at least 2 tokens"
+    mn = rng.choice(GIVEN_NAMES)
+    new = [tokens[0]] + [mn] + tokens[1:]
+    return ' '.join(new), f"middle name '{mn}' inserted"
+
+def _v_insert_multiple_prefixes(name, record, rng):
+    p1 = rng.choice(['Al-', 'El-', 'Abu '])
+    p2 = rng.choice(['Bin ', 'Ibn '])
+    return f"{p1}{p2}{name}", f"multiple prefixes '{p1}', '{p2}' prepended"
+
+def _v_insert_title_twice(name, record, rng):
+    title = rng.choice(['Dr', 'Sheikh', 'General', 'Mr'])
+    return f"{title} {title} {name}", f"title '{title}' prepended twice"
+
+def _v_insert_segment_middle(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: need at least 2 tokens"
+    seg = rng.choice(['International', 'Group', 'Global', 'National', 'General'])
+    mid = len(tokens) // 2
+    new = tokens[:mid] + [seg] + tokens[mid:]
+    return ' '.join(new), f"segment '{seg}' inserted in middle"
+
+def _v_reverse_comma(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: need at least 2 tokens"
+    last = tokens[-1]
+    rest = ' '.join(tokens[:-1])
+    return f"{last}, {rest}", "comma-delimited reversal: Last, First"
+
+def _v_swap_first_middle(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 3:
+        return None, "skip: need at least 3 tokens"
+    tokens[0], tokens[1] = tokens[1], tokens[0]
+    return ' '.join(tokens), "first and second tokens swapped"
+
+def _v_swap_surnames(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 3:
+        return None, "skip: need at least 3 tokens"
+    tokens[-1], tokens[-2] = tokens[-2], tokens[-1]
+    return ' '.join(tokens), "last two tokens (surnames) swapped"
+
+def _v_swap_start_pair(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 3:
+        return None, "skip: need at least 3 tokens"
+    tokens[0], tokens[1] = tokens[1], tokens[0]
+    return ' '.join(tokens), "first two tokens swapped"
+
+def _v_swap_end_pair(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 3:
+        return None, "skip: need at least 3 tokens"
+    tokens[-1], tokens[-2] = tokens[-2], tokens[-1]
+    return ' '.join(tokens), "last two tokens swapped"
+
+def _v_subst_article(name, record, rng):
+    tokens = name.split()
+    articles = list(ARTICLES)
+    for i, t in enumerate(tokens):
+        if _is_article(t):
+            alts = [a for a in articles if a != t.lower()]
+            if alts:
+                replacement = rng.choice(alts)
+                tokens[i] = replacement.capitalize() if i == 0 else replacement
+                return ' '.join(tokens), f"article '{t}' → '{tokens[i]}'"
+    # No article found — insert different one
+    arts = ['de', 'le', 'von', 'van']
+    return f"{name} {rng.choice(arts)}", "different article appended"
+
+def _v_subst_non_equiv_designator(name, record, rng):
+    tokens = name.split()
+    for i, t in enumerate(tokens):
+        if _is_legal_designator(t):
+            alts = ['Society', 'Cooperative', 'Syndicate', 'Consortium', 'Network']
+            rep = rng.choice(alts)
+            tokens[i] = rep
+            return ' '.join(tokens), f"designator '{t}' → non-equivalent '{rep}'"
+    return None, "skip: no legal designator found"
+
+def _v_subst_city(name, record, rng):
+    tokens = name.split()
+    cities_lc = {c.lower(): c for c in CITY_NAMES}
+    for i, t in enumerate(tokens):
+        if t.lower() in cities_lc:
+            alts = [c for c in CITY_NAMES if c.lower() != t.lower()]
+            tokens[i] = rng.choice(alts)
+            return ' '.join(tokens), f"city '{t}' replaced with different city"
+    # Append a different city if none found
+    city = rng.choice(CITY_NAMES)
+    return f"{name} {city}", f"city '{city}' appended as segment"
+
+def _v_subst_surname_variant(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: need at least 2 tokens"
+    last = tokens[-1]
+    # Apply a minor phonetic variation to the surname
+    lower = last.lower()
+    pairs = [('ei', 'i'), ('ou', 'u'), ('kh', 'h'), ('ai', 'ay'), ('hassan', 'hasan'),
+             ('hussein', 'hossein'), ('ali', 'aly'), ('ian', 'yan'), ('an', 'en')]
+    rng.shuffle(pairs)
+    for src, dst in pairs:
+        if src in lower:
+            new_last = lower.replace(src, dst, 1)
+            new_last = _restore_caps(last, new_last)
+            if new_last != last:
+                tokens[-1] = new_last
+                return ' '.join(tokens), f"surname variant: '{last}' → '{new_last}'"
+    # Fallback: add suffix variation
+    tokens[-1] = last + 'i'
+    return ' '.join(tokens), f"surname variant: '{last}' → '{last}i'"
+
+def _v_subst_all_surnames_snr(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: need at least 2 tokens"
+    new_last = rng.choice(PATRONYMICS)
+    tokens[-1] = new_last
+    return ' '.join(tokens), f"all surnames replaced: '{name}' → '{' '.join(tokens)}'"
+
+def _v_subst_entity_segment(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 3:
+        return None, "skip: need at least 3 tokens"
+    interior = list(range(1, len(tokens) - 1))
+    idx = rng.choice(interior)
+    replacements = ['International', 'Global', 'National', 'General', 'United', 'Allied']
+    tokens[idx] = rng.choice(replacements)
+    return ' '.join(tokens), f"entity segment at position {idx} replaced"
+
+def _v_subst_middle_name(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 3:
+        return None, "skip: need at least 3 tokens"
+    new_mid = rng.choice(GIVEN_NAMES)
+    tokens[1] = new_mid
+    return ' '.join(tokens), f"middle name replaced with '{new_mid}'"
+
+def _v_initial_first_and_last(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: need at least 2 tokens"
+    tokens[0] = tokens[0][0].upper() + '.'
+    tokens[-1] = tokens[-1][0].upper() + '.'
+    return ' '.join(tokens), "first and last tokens initialised"
+
+def _v_expand_acronym(name, record, rng):
+    # If name looks like an acronym (all caps, 2-5 chars), expand each letter
+    tokens = name.split()
+    for i, t in enumerate(tokens):
+        if len(t) >= 2 and t.isupper() and t.isalpha():
+            expanded = ' '.join(rng.choice(GIVEN_NAMES[:5]) if j % 2 == 0 else rng.choice(['International', 'National', 'General'])[0] for j, c in enumerate(t))
+            tokens[i] = ' '.join(c + '.' for c in t)
+            return ' '.join(tokens), f"acronym '{t}' expanded to initials"
+    # Fallback: just period-separate
+    return _v_period_short_name(name, record, rng)
+
+def _v_abbrev_multiple_tokens(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: need at least 2 tokens"
+    idxs = rng.sample(range(len(tokens)), min(2, len(tokens)))
+    changed = False
+    for i in idxs:
+        t = tokens[i]
+        if len(t) >= 5:
+            tokens[i] = t[:3] + '.'
+            changed = True
+    if not changed:
+        return None, "skip: tokens too short to abbreviate"
+    return ' '.join(tokens), "multiple tokens abbreviated"
+
+def _v_abbrev_first_middle(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 3:
+        return None, "skip: need at least 3 tokens"
+    tokens[0] = tokens[0][0].upper() + '.'
+    tokens[1] = tokens[1][0].upper() + '.'
+    return ' '.join(tokens), "first and middle tokens abbreviated to initials"
+
+def _v_city_typo_end(name, record, rng):
+    tokens = name.split()
+    cities_lc = {c.lower(): c for c in CITY_NAMES}
+    for i, t in enumerate(tokens):
+        if t.lower() in cities_lc:
+            if len(t) < 3:
+                continue
+            j = len(t) - 1
+            replacement = rng.choice('abcdefghijklmnoprstuvwxyz'.replace(t[j].lower(), ''))
+            tokens[i] = t[:j] + (replacement.upper() if t[j].isupper() else replacement)
+            return ' '.join(tokens), f"city '{t}' typo at end position"
+    return None, "skip: no recognised city token found"
+
+def _v_city_typo_start(name, record, rng):
+    tokens = name.split()
+    cities_lc = {c.lower(): c for c in CITY_NAMES}
+    for i, t in enumerate(tokens):
+        if t.lower() in cities_lc:
+            if len(t) < 3:
+                continue
+            replacement = rng.choice('abcdefghijklmnoprstuvwxyz'.replace(t[1].lower(), ''))
+            tokens[i] = t[0] + (replacement.upper() if t[1].isupper() else replacement) + t[2:]
+            return ' '.join(tokens), f"city '{t}' typo at start position"
+    return None, "skip: no recognised city token found"
+
+def _v_city_split_special(name, record, rng):
+    tokens = name.split()
+    cities_lc = {c.lower(): c for c in CITY_NAMES}
+    for i, t in enumerate(tokens):
+        if t.lower() in cities_lc and len(t) > 4:
+            mid = len(t) // 2
+            sep = rng.choice(['-', '.', '/'])
+            tokens[i] = t[:mid] + sep + t[mid:]
+            return ' '.join(tokens), f"city '{t}' split with '{sep}'"
+    return None, "skip: no city or city too short"
+
+def _v_city_add_char(name, record, rng):
+    tokens = name.split()
+    cities_lc = {c.lower(): c for c in CITY_NAMES}
+    for i, t in enumerate(tokens):
+        if t.lower() in cities_lc:
+            pos = rng.randint(1, len(t) - 1)
+            c = rng.choice(string.ascii_lowercase)
+            tokens[i] = t[:pos] + c + t[pos:]
+            return ' '.join(tokens), f"character inserted in city '{t}'"
+    return None, "skip: no city found"
+
+def _v_city_remove_char(name, record, rng):
+    tokens = name.split()
+    cities_lc = {c.lower(): c for c in CITY_NAMES}
+    for i, t in enumerate(tokens):
+        if t.lower() in cities_lc and len(t) > 3:
+            pos = rng.randint(1, len(t) - 2)
+            tokens[i] = t[:pos] + t[pos+1:]
+            return ' '.join(tokens), f"character removed from city '{t}'"
+    return None, "skip: no city found or too short"
+
+COUNTRY_ISO3: dict[str, str] = {
+    'iran': 'IRN', 'russia': 'RUS', 'north korea': 'PRK', 'china': 'CHN',
+    'syria': 'SYR', 'cuba': 'CUB', 'venezuela': 'VEN', 'belarus': 'BLR',
+    'myanmar': 'MMR', 'nicaragua': 'NIC', 'yemen': 'YEM', 'libya': 'LBY',
+    'sudan': 'SDN', 'iraq': 'IRQ', 'afghanistan': 'AFG', 'lebanon': 'LBN',
+    'somalia': 'SOM',
+}
+
+def _v_country_iso3(name, record, rng):
+    tokens = name.split()
+    for i, t in enumerate(tokens):
+        iso3 = COUNTRY_ISO3.get(t.lower())
+        if iso3:
+            tokens[i] = iso3
+            return ' '.join(tokens), f"country '{t}' → ISO-3 '{iso3}'"
+    return None, "skip: no recognised country token"
+
+def _v_country_city_embargo(name, record, rng):
+    nationality = (record.get('nationality') or '').lower()
+    country_cities = {
+        'iranian': ('Tehran', 'Iran'), 'russian': ('Moscow', 'Russia'),
+        'north korean': ('Pyongyang', 'North Korea'), 'syrian': ('Damascus', 'Syria'),
+        'cuban': ('Havana', 'Cuba'),
+    }
+    pair = country_cities.get(nationality)
+    if pair:
+        return f"{name} {pair[0]} {pair[1]}", f"city+country '{pair[0]} {pair[1]}' appended"
+    city = rng.choice(['Tehran', 'Moscow', 'Damascus', 'Pyongyang'])
+    return f"{name} {city}", f"embargo city '{city}' appended"
+
+def _v_country_abbreviation(name, record, rng):
+    abbrevs = {
+        'iran': 'Ir.', 'russia': 'Rus.', 'north korea': 'N. Korea',
+        'china': 'Ch.', 'syria': 'Syr.', 'venezuela': 'Ven.',
+    }
+    tokens = name.split()
+    for i, t in enumerate(tokens):
+        abbr = abbrevs.get(t.lower())
+        if abbr:
+            tokens[i] = abbr
+            return ' '.join(tokens), f"country '{t}' abbreviated to '{abbr}'"
+    return None, "skip: no recognised country to abbreviate"
+
+DEMONYMS: dict[str, str] = {
+    'iran': 'Iranian', 'russia': 'Russian', 'north korea': 'North Korean',
+    'china': 'Chinese', 'syria': 'Syrian', 'cuba': 'Cuban',
+    'venezuela': 'Venezuelan', 'belarus': 'Belarusian', 'myanmar': 'Burmese',
+}
+
+def _v_nationality_descriptor(name, record, rng):
+    nationality = (record.get('nationality') or '').lower()
+    if nationality in NATIONALITY_ISO2:
+        demonym = nationality.title()
+        return f"{demonym} {name}", f"nationality descriptor '{demonym}' prepended"
+    tokens = name.split()
+    for t in tokens:
+        dem = DEMONYMS.get(t.lower())
+        if dem:
+            return f"{dem} {name}", f"nationality descriptor '{dem}' prepended"
+    dem = rng.choice(['Iranian', 'Russian', 'Syrian', 'Chinese'])
+    return f"{dem} {name}", f"nationality descriptor '{dem}' prepended"
+
+def _v_char_insert_start(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    c = rng.choice(string.ascii_lowercase)
+    tokens[idx] = c + t
+    return ' '.join(tokens), f"character '{c}' inserted at start of token"
+
+def _v_char_insert_end(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    c = rng.choice(string.ascii_lowercase)
+    tokens[idx] = t + c
+    return ' '.join(tokens), f"character '{c}' appended at end of token"
+
+def _v_char_insert_two(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 3:
+        return None, "skip: token too short"
+    c1 = rng.choice(string.ascii_lowercase)
+    c2 = rng.choice(string.ascii_lowercase)
+    p1 = rng.randint(0, len(t))
+    p2 = rng.randint(0, len(t) + 1)
+    t1 = t[:p1] + c1 + t[p1:]
+    tokens[idx] = t1[:p2] + c2 + t1[p2:]
+    return ' '.join(tokens), f"two characters '{c1}' and '{c2}' inserted"
+
+def _v_char_delete_start(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 4:
+        return None, "skip: token too short"
+    tokens[idx] = t[1:]
+    return ' '.join(tokens), "first character deleted"
+
+def _v_char_delete_end(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 4:
+        return None, "skip: token too short"
+    tokens[idx] = t[:-1]
+    return ' '.join(tokens), "last character deleted"
+
+def _v_char_delete_two(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 5:
+        return None, "skip: token too short"
+    alpha = [i for i, c in enumerate(t) if c.isalpha()]
+    if len(alpha) < 2:
+        return None, "skip: insufficient alpha chars"
+    p1, p2 = sorted(rng.sample(alpha, 2), reverse=True)
+    t2 = t[:p1] + t[p1+1:]
+    t2 = t2[:p2] + t2[p2+1:] if p2 < len(t2) else t2
+    tokens[idx] = t2
+    return ' '.join(tokens), f"two characters at positions {p1},{p2} deleted"
+
+LETTER_TO_NUM: dict[str, str] = {
+    'o': '0', 'O': '0', 'i': '1', 'I': '1', 'l': '1', 'z': '2', 'Z': '2',
+    'e': '3', 'E': '3', 'a': '4', 'A': '4', 's': '5', 'S': '5',
+    'g': '9', 'G': '9', 'b': '8', 'B': '8', 't': '7', 'T': '7',
+}
+
+def _v_numeric_substitute(name, record, rng):
+    candidates = [(i, c) for i, c in enumerate(name) if c in LETTER_TO_NUM]
+    if not candidates:
+        return None, "skip: no substitutable letters"
+    pos, char = rng.choice(candidates)
+    result = name[:pos] + LETTER_TO_NUM[char] + name[pos+1:]
+    return result, f"letter '{char}' → numeral '{LETTER_TO_NUM[char]}'"
+
+def _v_numeric_multi(name, record, rng):
+    candidates = [(i, c) for i, c in enumerate(name) if c in LETTER_TO_NUM]
+    if len(candidates) < 2:
+        return None, "skip: insufficient substitutable letters"
+    chosen = rng.sample(candidates, min(3, len(candidates)))
+    lst = list(name)
+    for pos, char in chosen:
+        lst[pos] = LETTER_TO_NUM[char]
+    result = ''.join(lst)
+    if result == name:
+        return None, "skip: no change"
+    return result, f"multiple numeric substitutions: {[(c, LETTER_TO_NUM[c]) for _, c in chosen]}"
+
+def _v_numeric_segment(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    result = ''.join(LETTER_TO_NUM.get(c, c) for c in t)
+    if result == t:
+        return None, "skip: no substitutable letters"
+    tokens[idx] = result
+    return ' '.join(tokens), f"token '{t}' → '{result}' (all letter→numeral)"
+
+def _v_phonetic_multi(name, record, rng):
+    lower = name.lower()
+    applied = []
+    result = lower
+    for pattern, replacement in _shuffled_phonetic(PHONETIC_PATTERNS, rng)[:3]:
+        if pattern in result and result != result.replace(pattern, replacement, 1):
+            result = result.replace(pattern, replacement, 1)
+            applied.append(f"'{pattern}'→'{replacement}'")
+            if len(applied) >= 2:
+                break
+    if not applied or result == lower:
+        return None, "skip: no applicable phonetic patterns"
+    return _restore_caps(name, result), f"multiple phonetic subs: {', '.join(applied)}"
+
+def _v_phonetic_cross_part(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    idx = rng.choice(range(len(tokens)))
+    t = tokens[idx]
+    lower = t.lower()
+    for pattern, replacement in _shuffled_phonetic(PHONETIC_PATTERNS, rng):
+        if pattern in lower:
+            new_t = lower.replace(pattern, replacement, 1)
+            if new_t != lower:
+                tokens[idx] = _restore_caps(t, new_t)
+                return ' '.join(tokens), f"phonetic sub in token {idx}: '{pattern}'→'{replacement}'"
+    return None, "skip: no phonetic pattern found"
+
+def _v_char_repeat_two_letters(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    alpha = [i for i, c in enumerate(t) if c.isalpha()]
+    if len(alpha) < 2:
+        return None, "skip: insufficient alpha chars"
+    p1, p2 = sorted(rng.sample(alpha, 2))
+    lst = list(t)
+    lst.insert(p2 + 1, lst[p2])
+    lst.insert(p1 + 1, lst[p1])
+    tokens[idx] = ''.join(lst)
+    return ' '.join(tokens), f"two letters repeated at positions {p1},{p2}"
+
+def _v_char_repeat_thrice(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    alpha = [i for i, c in enumerate(t) if c.isalpha()]
+    if not alpha:
+        return None, "skip: no alpha chars"
+    pos = rng.choice(alpha)
+    tokens[idx] = t[:pos] + t[pos] * 2 + t[pos:]
+    return ' '.join(tokens), f"character '{t[pos]}' at pos {pos} repeated twice extra"
+
+def _v_char_transpose_non_adjacent(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    alpha = [i for i, c in enumerate(t) if c.isalpha()]
+    non_adj = [(i, j) for i in alpha for j in alpha if j - i > 2]
+    if not non_adj:
+        return None, "skip: no non-adjacent alpha pair"
+    p1, p2 = rng.choice(non_adj)
+    lst = list(t)
+    lst[p1], lst[p2] = lst[p2], lst[p1]
+    tokens[idx] = ''.join(lst)
+    return ' '.join(tokens), f"non-adjacent chars at positions {p1},{p2} transposed"
+
+def _v_char_transpose_multiple(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 5:
+        return None, "skip: token too short"
+    lst = list(t)
+    n_swaps = rng.randint(2, min(4, len(lst) // 2))
+    positions = rng.sample(range(len(lst) - 1), n_swaps)
+    for pos in positions:
+        lst[pos], lst[pos+1] = lst[pos+1], lst[pos]
+    tokens[idx] = ''.join(lst)
+    return ' '.join(tokens), f"{n_swaps} character transpositions applied"
+
+def _v_truncate_front_two(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 5:
+        return None, "skip: token too short"
+    tokens[idx] = t[2:]
+    return ' '.join(tokens), "first 2 characters truncated from front"
+
+def _v_truncate_end_two(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 5:
+        return None, "skip: token too short"
+    tokens[idx] = t[:-2]
+    return ' '.join(tokens), "last 2 characters truncated from end"
+
+def _v_truncate_middle(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 6:
+        return None, "skip: token too short"
+    mid = len(t) // 2
+    n = rng.choice([1, 2])
+    tokens[idx] = t[:mid - n//2] + t[mid + (n - n//2):]
+    return ' '.join(tokens), f"{n} character(s) removed from middle of token"
+
+def _v_typo_first_letter(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if not t or not t[0].isalpha():
+        return None, "skip: first char not alpha"
+    replacement = _keyboard_typo(t[0], rng)
+    tokens[idx] = replacement + t[1:]
+    return ' '.join(tokens), f"typo on first letter: '{t[0]}' → '{replacement}'"
+
+def _v_typo_adjacent(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    alpha = [i for i, c in enumerate(t) if c.isalpha()]
+    if len(alpha) < 3:
+        return None, "skip: insufficient alpha chars"
+    # Pick two adjacent alpha positions
+    adj_pairs = [(alpha[i], alpha[i+1]) for i in range(len(alpha)-1) if alpha[i+1] - alpha[i] == 1]
+    if not adj_pairs:
+        return None, "skip: no adjacent alpha pair"
+    p1, p2 = rng.choice(adj_pairs)
+    lst = list(t)
+    lst[p1] = _keyboard_typo(lst[p1], rng)
+    lst[p2] = _keyboard_typo(lst[p2], rng)
+    tokens[idx] = ''.join(lst)
+    return ' '.join(tokens), f"two adjacent typos at positions {p1},{p2}"
+
+def _v_typo_noise_parts(name, record, rng):
+    tokens = name.split()
+    # Find article or designator token to introduce typo in
+    noise_idxs = [i for i, t in enumerate(tokens) if _is_article(t) or _is_legal_designator(t)]
+    if not noise_idxs:
+        return None, "skip: no noise/stop words found"
+    idx = rng.choice(noise_idxs)
+    t = tokens[idx]
+    alpha = [i for i, c in enumerate(t) if c.isalpha()]
+    if not alpha:
+        return None, "skip: no alpha chars in noise token"
+    pos = rng.choice(alpha)
+    replacement = _keyboard_typo(t[pos], rng)
+    tokens[idx] = t[:pos] + replacement + t[pos+1:]
+    return ' '.join(tokens), f"typo in noise part '{t}' → '{tokens[idx]}'"
+
+def _v_typo_across_parts(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    # Introduce typos in two different tokens
+    idxs = rng.sample(range(len(tokens)), min(2, len(tokens)))
+    for idx in idxs:
+        t = tokens[idx]
+        alpha = [i for i, c in enumerate(t) if c.isalpha()]
+        if alpha:
+            pos = rng.choice(alpha)
+            tokens[idx] = t[:pos] + _keyboard_typo(t[pos], rng) + t[pos+1:]
+    return ' '.join(tokens), "typos introduced across different name parts"
+
+def _v_typo_stop_word(name, record, rng):
+    tokens = name.split()
+    stop = [i for i, t in enumerate(tokens) if _is_article(t)]
+    if not stop:
+        return None, "skip: no stop words found"
+    idx = rng.choice(stop)
+    t = tokens[idx]
+    if not t:
+        return None, "skip"
+    pos = rng.randint(0, len(t) - 1)
+    replacement = rng.choice(string.ascii_lowercase.replace(t[pos].lower(), ''))
+    tokens[idx] = t[:pos] + replacement + t[pos+1:]
+    return ' '.join(tokens), f"typo on stop word '{t}'"
+
+SPECIAL_CHARS = ['@', '#', '$', '%', '&', '*', '+', '=', '~', '^']
+
+def _v_special_char_add(name, record, rng):
+    sc = rng.choice(SPECIAL_CHARS)
+    pos = rng.choice(['start', 'end', 'middle'])
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if pos == 'start':
+        tokens[idx] = sc + t
+    elif pos == 'end':
+        tokens[idx] = t + sc
+    else:
+        mid = len(t) // 2
+        tokens[idx] = t[:mid] + sc + t[mid:]
+    return ' '.join(tokens), f"special char '{sc}' added at {pos}"
+
+def _v_special_char_add_multiple(name, record, rng):
+    chars = rng.sample(SPECIAL_CHARS, min(3, len(SPECIAL_CHARS)))
+    result = name
+    for sc in chars:
+        pos = rng.randint(1, len(result))
+        result = result[:pos] + sc + result[pos:]
+    return result, f"multiple special chars added: {''.join(chars)}"
+
+def _v_special_between_letters(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if len(t) < 3:
+        return None, "skip: token too short"
+    sc = rng.choice(SPECIAL_CHARS)
+    tokens[idx] = sc.join(list(t))
+    return ' '.join(tokens), f"letters of '{t}' separated by '{sc}'"
+
+def _v_special_between_parts(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    sc = rng.choice(SPECIAL_CHARS)
+    return sc.join(tokens), f"name parts separated by '{sc}'"
+
+def _v_special_surround_words(name, record, rng):
+    sc = rng.choice(SPECIAL_CHARS)
+    tokens = name.split()
+    new = []
+    for t in tokens:
+        new.append(rng.choice(['', sc]) + t + rng.choice(['', sc]))
+    return ' '.join(new), f"special chars '{sc}' inserted within name"
+
+def _v_noise_surround(name, record, rng):
+    noise = ''.join(rng.choices('!@#$%^&*+=~', k=rng.randint(2, 4)))
+    return f"{noise}{name}{noise}", f"noise '{noise}' surrounding name"
+
+def _v_noise_adjacent(name, record, rng):
+    noise = ''.join(rng.choices('!@#$%', k=rng.randint(2, 3)))
+    return f"{name}{noise}", f"noise '{noise}' appended adjacent"
+
+def _v_space_very_large(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    n = rng.randint(5, 10)
+    return (' ' * n).join(tokens), f"{n} spaces between tokens"
+
+def _v_special_replace_equiv(name, record, rng):
+    repls = {'-': '–', "'": '\u2019', '.': '·', '/': '\\'}
+    for char, equiv in repls.items():
+        if char in name:
+            return name.replace(char, equiv, 1), f"'{char}' → Unicode equivalent '{equiv}'"
+    return None, "skip: no replaceable special character"
+
+def _v_special_remove_single(name, record, rng):
+    specials = [i for i, c in enumerate(name) if not c.isalnum() and c != ' ']
+    if not specials:
+        return None, "skip: no special characters"
+    pos = rng.choice(specials)
+    return name[:pos] + name[pos+1:], f"single special char at position {pos} removed"
+
+def _v_compress_partial(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    i = rng.randint(0, len(tokens) - 2)
+    tokens[i] = tokens[i] + tokens[i+1]
+    del tokens[i+1]
+    return ' '.join(tokens), f"tokens {i} and {i+1} compressed together"
+
+def _v_split_all_letters(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    tokens[idx] = ' '.join(list(t))
+    return ' '.join(tokens), f"token '{t}' split into individual letters"
+
+def _v_split_newline(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    pos = rng.randint(1, len(tokens) - 1)
+    return ' '.join(tokens[:pos]) + '\n' + ' '.join(tokens[pos:]), "newline used as token delimiter"
+
+def _v_letter_to_special(name, record, rng):
+    alpha = [(i, c) for i, c in enumerate(name) if c.isalpha()]
+    if not alpha:
+        return None, "skip: no alpha chars"
+    pos, char = rng.choice(alpha)
+    sc = rng.choice(SPECIAL_CHARS)
+    return name[:pos] + sc + name[pos+1:], f"letter '{char}' → special char '{sc}'"
+
+def _v_name_part_to_special_snr(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    idx = rng.choice(range(len(tokens)))
+    sc = rng.choice(SPECIAL_CHARS)
+    tokens[idx] = sc * len(tokens[idx])
+    return ' '.join(tokens), f"token replaced with '{sc}' chars"
+
+def _v_short_special(name, record, rng):
+    tokens = name.split()
+    if not tokens:
+        return None, "skip"
+    t = tokens[0]
+    if len(t) < 2:
+        return None, "skip: token too short"
+    sc = rng.choice(SPECIAL_CHARS)
+    mid = len(t) // 2
+    tokens[0] = t[:mid] + sc + t[mid:]
+    return ' '.join(tokens), f"special char '{sc}' inserted in short name"
+
+def _v_accent_inverted_q(name, record, rng):
+    tokens = name.split()
+    idx = _longest_alpha_token(tokens)
+    t = tokens[idx]
+    if not t:
+        return None, "skip"
+    # Insert inverted question mark or exclamation
+    char = rng.choice(['¿', '¡', 'ñ'])
+    mid = len(t) // 2
+    tokens[idx] = t[:mid] + char + t[mid:]
+    return ' '.join(tokens), f"special accent char '{char}' inserted"
+
+def _v_to_cyrillic(name, record, rng):
+    # Reverse: put Cyrillic look-alikes where possible
+    reverse_map = {v: k for k, v in CYRILLIC_LATIN.items() if len(v) == 1 and v.isalpha()}
+    result = ''.join(reverse_map.get(c.upper(), reverse_map.get(c, c)) for c in name)
+    if result == name:
+        # Use homoglyph map instead
+        return _v_homoglyph(name, record, rng)
+    return result, "Latin characters replaced with Cyrillic look-alikes"
+
+def _v_leet_speak_numbers(name, record, rng):
+    return _v_numeric_multi(name, record, rng)
+
+def _v_leet_speak_currency(name, record, rng):
+    CURRENCY_MAP = {'s': '$', 'S': '$', 'e': '€', 'E': '€', 'a': '@', 'A': '@',
+                    'l': '£', 'L': '£', 'o': '⊕', 'O': '⊕'}
+    candidates = [(i, c) for i, c in enumerate(name) if c in CURRENCY_MAP]
+    if not candidates:
+        return None, "skip: no substitutable letters"
+    chosen = rng.sample(candidates, min(2, len(candidates)))
+    lst = list(name)
+    for pos, char in chosen:
+        lst[pos] = CURRENCY_MAP[char]
+    return ''.join(lst), f"currency symbol substitutions applied"
+
+def _v_name_fragment(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    sep = rng.choice([' | ', ' / ', ' + '])
+    mid = len(tokens) // 2
+    return ' '.join(tokens[:mid]) + sep + ' '.join(tokens[mid:]), f"name fragmented with '{sep.strip()}'"
+
+def _v_transliteration_mismatch(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    # Apply different romanisation rules to different tokens
+    idx1, idx2 = rng.sample(range(len(tokens)), min(2, len(tokens)))
+    lower1 = tokens[idx1].lower()
+    lower2 = tokens[idx2].lower()
+    pairs1 = [('kh', 'h'), ('ou', 'u'), ('ei', 'i'), ('ai', 'ay')]
+    pairs2 = [('h', 'kh'), ('u', 'ou'), ('i', 'ei'), ('ay', 'ai')]
+    rng.shuffle(pairs1)
+    for src, dst in pairs1:
+        if src in lower1:
+            tokens[idx1] = _restore_caps(tokens[idx1], lower1.replace(src, dst, 1))
+            break
+    rng.shuffle(pairs2)
+    for src, dst in pairs2:
+        if src in lower2:
+            tokens[idx2] = _restore_caps(tokens[idx2], lower2.replace(src, dst, 1))
+            break
+    return ' '.join(tokens), "inconsistent romanisation applied across tokens"
+
+def _v_junk_account_number(name, record, rng):
+    prefix = rng.choice(['ACCT-', 'ACC/', 'A/C:', 'REF:'])
+    num = ''.join(rng.choices(string.digits, k=rng.randint(8, 12)))
+    return f"{name} {prefix}{num}", f"account number '{prefix}{num}' appended"
+
+def _v_address_spillover(name, record, rng):
+    addrs = ['123 Main St', '45 High Road', 'P.O. Box 1234', 'Suite 500']
+    addr = rng.choice(addrs)
+    return f"{name} {addr}", f"address fragment '{addr}' appended"
+
+def _v_short_single_char(name, record, rng):
+    tokens = name.split()
+    # Find a token that can be reduced to a single char
+    for i, t in enumerate(tokens):
+        if len(t) >= 2 and t.isalpha():
+            tokens[i] = t[0]
+            return ' '.join(tokens), f"token '{t}' reduced to single char '{t[0]}'"
+    return None, "skip: no suitable token"
+
+def _v_first_word_only(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: single token"
+    return tokens[0], "only first token retained"
+
+def _v_mononym(name, record, rng):
+    tokens = name.split()
+    if len(tokens) < 2:
+        return None, "skip: already single token"
+    return rng.choice(tokens), "single name token (mononym) selected"
+
+def _v_lowercase(name, record, rng):
+    return name.lower(), "name converted to lowercase"
+
+def _v_leading_zero(name, record, rng):
+    tokens = name.split()
+    # Find a token with digits and prepend 0
+    for i, t in enumerate(tokens):
+        if any(c.isdigit() for c in t):
+            tokens[i] = '0' + t
+            return ' '.join(tokens), f"leading zero added to '{t}'"
+    # Append a zero-prefixed number
+    return f"{name} 0{rng.randint(100,999)}", "leading zero added to appended number"
+
+def _v_remove_leading_zero(name, record, rng):
+    tokens = name.split()
+    for i, t in enumerate(tokens):
+        if t.startswith('0') and len(t) > 1:
+            tokens[i] = t[1:]
+            return ' '.join(tokens), f"leading zero removed from '{t}'"
+    return None, "skip: no token starts with 0"
+
+def _v_append_suffix(name, record, rng):
+    suffixes = ['Oblast', 'Region', 'Province', 'District', 'Prefecture']
+    s = rng.choice(suffixes)
+    return f"{name} {s}", f"administrative suffix '{s}' appended"
+
+def _v_append_region(name, record, rng):
+    regions = ['North', 'South', 'East', 'West', 'Central', 'Greater']
+    r = rng.choice(regions)
+    return f"{name} {r}", f"region qualifier '{r}' appended"
+
+COUNTRY_COMMON_NAMES: dict[str, str] = {
+    'russian federation': 'Russia',
+    'russia': 'Russian Federation',
+    "democratic people's republic of korea": 'North Korea',
+    'north korea': "Democratic People's Republic of Korea",
+    'dprk': 'North Korea',
+    'syrian arab republic': 'Syria',
+    'syria': 'Syrian Arab Republic',
+    'union of myanmar': 'Myanmar',
+    'myanmar': 'Burma',
+    'burma': 'Myanmar',
+    'republic of cuba': 'Cuba',
+    "côte d'ivoire": 'Ivory Coast',
+    'ivory coast': "Côte d'Ivoire",
+    'kingdom of eswatini': 'Swaziland',
+    'eswatini': 'Swaziland',
+    'swaziland': 'Eswatini',
+}
+
+def _v_country_common_alt(name, record, rng):
+    lower = name.lower()
+    for src, dst in COUNTRY_COMMON_NAMES.items():
+        if src in lower:
+            result = lower.replace(src, dst.lower(), 1)
+            return _restore_caps(name, result), f"country name '{src}' → '{dst}'"
+    return None, "skip: no recognised country name variant"
+
+def _v_demonym(name, record, rng):
+    demonym_map = {
+        'iran': 'Iranian', 'russia': 'Russian', 'china': 'Chinese',
+        'syria': 'Syrian', 'cuba': 'Cuban', 'venezuela': 'Venezuelan',
+        'belarus': 'Belarusian', 'myanmar': 'Burmese', 'iraq': 'Iraqi',
+    }
+    tokens = name.split()
+    for i, t in enumerate(tokens):
+        dem = demonym_map.get(t.lower())
+        if dem:
+            tokens[i] = dem
+            return ' '.join(tokens), f"country '{t}' → demonym '{dem}'"
+    return None, "skip: no substitutable country"
+
+
 # ── Dispatch table: type_id → function ────────────────────────────────────────
 
+# Types where test_name intentionally equals source name — skip the same-name guard
+PASSTHROUGH_TYPES: set[str] = {'TC001', 'TC001B'}
+
+# Types that require sampling only primary or AKA entries respectively
+PRIMARY_AKA_FILTER_MAP: dict[str, str] = {
+    'TC001':  'primary',
+    'TC001B': 'aka',
+}
+
 VARIATION_FUNCTIONS: dict[str, Callable] = {
-    'TC001': _v_exact_match,
+    'TC001':  _v_primary_name_match,
+    'TC001B': _v_aka_match,
     'TC002': _v_omit_article,
     'TC003': _v_omit_legal_designator,
     'TC004': _v_omit_location_segment,
@@ -837,6 +1810,107 @@ VARIATION_FUNCTIONS: dict[str, Callable] = {
     'TC056': _v_noise_suffix,
     'TC057': _v_country_code_suffix,
     'TC058': _v_period_short_name,
+    # ── TC059+ new types from Screening Test Matrix ────────────────────────────
+    'TC059': _v_omit_all_articles,
+    'TC060': _v_omit_all_legal_designators,
+    'TC061': _v_omit_middle_name,           # all middle names → same as single
+    'TC062': _v_omit_surname,
+    'TC063': _v_omit_all_surnames_keep_first,
+    'TC064': _v_omit_multiple_segments,
+    'TC065': _v_insert_multiple_articles,
+    'TC066': _v_insert_legal_designator_front,
+    'TC067': _v_duplicate_legal_designator,
+    'TC068': _v_insert_country_name,
+    'TC069': _v_insert_middle_name,
+    'TC070': _v_insert_multiple_prefixes,
+    'TC071': _v_insert_title_twice,
+    'TC072': _v_insert_segment_middle,
+    'TC073': _v_reverse_comma,
+    'TC074': _v_swap_first_middle,
+    'TC075': _v_swap_surnames,
+    'TC076': _v_swap_start_pair,
+    'TC077': _v_swap_end_pair,
+    'TC078': _v_subst_article,
+    'TC079': _v_subst_non_equiv_designator,
+    'TC080': _v_subst_city,
+    'TC081': _v_subst_surname_variant,
+    'TC082': _v_subst_all_surnames_snr,
+    'TC083': _v_subst_entity_segment,
+    'TC084': _v_subst_middle_name,
+    'TC085': _v_initial_first_and_last,
+    'TC086': _v_expand_acronym,
+    'TC087': _v_abbrev_multiple_tokens,
+    'TC088': _v_abbrev_first_middle,
+    'TC091': _v_city_typo_end,
+    'TC092': _v_city_typo_start,
+    'TC093': _v_city_split_special,
+    'TC094': _v_city_add_char,
+    'TC095': _v_city_remove_char,
+    'TC096': _v_country_iso3,
+    'TC097': _v_country_city_embargo,
+    'TC098': _v_country_abbreviation,
+    'TC099': _v_nationality_descriptor,
+    'TC102': _v_char_insert_start,
+    'TC103': _v_char_insert_end,
+    'TC104': _v_char_insert_two,
+    'TC105': _v_char_delete_start,
+    'TC106': _v_char_delete_end,
+    'TC107': _v_char_delete_two,
+    'TC108': _v_numeric_substitute,
+    'TC109': _v_numeric_multi,
+    'TC110': _v_numeric_segment,
+    'TC111': _v_phonetic_multi,
+    'TC112': _v_phonetic_cross_part,
+    'TC113': _v_char_repeat_two_letters,
+    'TC114': _v_char_repeat_thrice,
+    'TC115': _v_char_transpose_non_adjacent,
+    'TC116': _v_char_transpose_multiple,
+    'TC117': _v_truncate_front_two,
+    'TC118': _v_truncate_end_two,
+    'TC119': _v_truncate_middle,
+    'TC120': _v_typo_first_letter,
+    'TC121': _v_typo_adjacent,
+    'TC122': _v_typo_noise_parts,
+    'TC123': _v_typo_across_parts,
+    'TC124': _v_typo_stop_word,
+    'TC125': _v_special_char_add,
+    'TC126': _v_special_char_add_multiple,
+    'TC127': _v_special_between_letters,
+    'TC128': _v_special_between_parts,
+    'TC129': _v_special_surround_words,
+    'TC130': _v_noise_surround,
+    'TC131': _v_noise_adjacent,
+    'TC132': _v_space_very_large,
+    'TC133': _v_special_replace_equiv,
+    'TC134': _v_special_remove_single,
+    'TC135': _v_compress_partial,
+    'TC136': _v_split_all_letters,
+    'TC137': _v_split_newline,
+    'TC138': _v_letter_to_special,
+    'TC139': _v_name_part_to_special_snr,
+    'TC140': _v_short_special,
+    'TC141': _v_accent_inverted_q,
+    'TC146': _v_to_cyrillic,
+    'TC172': _v_to_cyrillic,
+    'TC177': _v_leet_speak_numbers,
+    'TC178': _v_leet_speak_currency,
+    'TC179': _v_name_fragment,
+    'TC182': _v_transliteration_mismatch,
+    'TC184': _v_junk_account_number,
+    'TC185': _v_address_spillover,
+    'TC187': _v_short_single_char,
+    'TC189': _v_mononym,
+    'TC192': _v_leading_zero,
+    'TC193': _v_lowercase,
+    'TC198': _v_first_word_only,
+    'TC202': _v_remove_leading_zero,
+    'TC207': _v_first_word_only,
+    'TC212': _v_append_suffix,
+    'TC213': _v_append_region,
+    'TC216': _v_append_suffix,
+    'TC253': _v_country_common_alt,
+    'TC255': _v_country_common_alt,
+    'TC261': _v_demonym,
 }
 
 
@@ -904,6 +1978,8 @@ async def _sample_names(
     db: aiosqlite.Connection,
     distribution: str = 'balanced',
     custom_dist: dict | None = None,
+    primary_aka_filter: str | None = None,
+    watchlists: list[str] | None = None,
 ) -> list[dict]:
     """
     Stratified sample of watchlist entries for a given type's constraints.
@@ -911,6 +1987,10 @@ async def _sample_names(
     """
     conditions = []
     params: list = []
+
+    if primary_aka_filter is not None:
+        conditions.append("primary_aka = ?")
+        params.append(primary_aka_filter)
 
     if applicable_entity_types and 'unknown' not in applicable_entity_types:
         # If "all" types listed, skip filter
@@ -928,9 +2008,60 @@ async def _sample_names(
         conditions.append(f"name_length >= ?")
         params.append(min_name_length)
 
+    if watchlists:
+        ph = ', '.join('?' for _ in watchlists)
+        conditions.append(f"watchlist IN ({ph})")
+        params.extend(watchlists)
+
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    # Get total available
+    _SELECT = """SELECT uid, watchlist, sub_watchlist_1, cleaned_name, original_name,
+                        primary_aka, entity_type, num_tokens, name_length,
+                        name_culture, sanctions_program
+                 FROM watchlist_entries"""
+
+    # ── Custom distribution: stratified sample per culture ────────────────────
+    if distribution == 'custom' and custom_dist:
+        active = [(c, float(pct)) for c, pct in custom_dist.items() if (pct or 0) > 0]
+        if active:
+            total_pct = sum(pct for _, pct in active)
+            all_rows: list[dict] = []
+            for culture, pct in active:
+                n = max(2, round(count * 10 * pct / total_pct))
+                c_conditions = conditions + ["name_culture = ?"]
+                c_params = params + [culture]
+                c_where = "WHERE " + " AND ".join(c_conditions)
+                async with db.execute(
+                    f"{_SELECT} {c_where} ORDER BY RANDOM() LIMIT ?",
+                    c_params + [n],
+                ) as cur:
+                    all_rows.extend([dict(r) for r in await cur.fetchall()])
+            return all_rows
+
+    # ── Balanced distribution: equal sample from each available culture ────────
+    if distribution == 'balanced':
+        culture_cond = "name_culture IS NOT NULL AND name_culture != ''"
+        culture_where = (where + " AND " + culture_cond) if where else ("WHERE " + culture_cond)
+        async with db.execute(
+            f"SELECT DISTINCT name_culture FROM watchlist_entries {culture_where}",
+            params,
+        ) as cur:
+            cultures = [r[0] for r in await cur.fetchall()]
+        if cultures:
+            per_culture = max(2, (count * 10) // len(cultures))
+            all_rows = []
+            for culture in cultures:
+                c_conditions = conditions + ["name_culture = ?"]
+                c_params = params + [culture]
+                c_where = "WHERE " + " AND ".join(c_conditions)
+                async with db.execute(
+                    f"{_SELECT} {c_where} ORDER BY RANDOM() LIMIT ?",
+                    c_params + [per_culture],
+                ) as cur:
+                    all_rows.extend([dict(r) for r in await cur.fetchall()])
+            return all_rows
+
+    # ── Weighted / fallback: random sample from full candidate pool ───────────
     async with db.execute(
         f"SELECT COUNT(*) FROM watchlist_entries {where}", params
     ) as cur:
@@ -939,15 +2070,9 @@ async def _sample_names(
     if total == 0:
         return []
 
-    # Sample up to 2x count, randomly ordered
-    sample_n = min(count * 3, total)
+    sample_n = min(count * 10, total)
     async with db.execute(
-        f"""SELECT uid, watchlist, sub_watchlist_1, cleaned_name, original_name,
-                   primary_aka, entity_type, num_tokens, name_length,
-                   nationality, sanctions_program
-            FROM watchlist_entries {where}
-            ORDER BY RANDOM()
-            LIMIT ?""",
+        f"{_SELECT} {where} ORDER BY RANDOM() LIMIT ?",
         params + [sample_n],
     ) as cur:
         rows = await cur.fetchall()
@@ -964,11 +2089,15 @@ async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connecti
     Returns a summary dict.
     """
     # Merge built-in CSV types + custom DB types
-    builtin_types = {t.type_id: t for t in load_test_case_types()}
+    # Keep first occurrence of each type_id (CSV may have duplicate type_ids for multi-theme reuse)
+    builtin_types = {}
+    for t in load_test_case_types():
+        if t.type_id not in builtin_types:
+            builtin_types[t.type_id] = t
     custom_types = {t.type_id: t for t in await load_custom_types(db)}
     all_types = {**builtin_types, **custom_types}
 
-    meta_by_id = {tid: _get_type_meta(tid) for tid in request.type_ids if not tid.startswith('TC_CUSTOM_')}
+    meta_by_id = {tid: _get_type_meta(tid) for tid in request.type_ids if not tid.startswith('USER')}
 
     rng = random.Random()  # Seeded per-run for reproducibility within session
 
@@ -988,9 +2117,11 @@ async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connecti
         type_def = all_types[type_id]
 
         # Resolve variation function: built-in dispatch table or custom lambda
-        if type_id.startswith('TC_CUSTOM_'):
+        if type_id.startswith('USER'):
             lambda_str = await get_custom_lambda(type_id, db)
             if not lambda_str:
+                _ets = ['individual', 'entity', 'vessel', 'aircraft', 'country', 'unknown']
+                summary['by_type'][type_id] = {'generated': 0, 'skipped': 0, 'by_entity_type': {et: {'generated': 0, 'skipped': 0, 'reason': 'no_variation_function'} for et in _ets}}
                 continue
             var_fn = _make_lambda_fn(lambda_str)
             expected_outcome = type_def.expected_outcome
@@ -998,66 +2129,107 @@ async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connecti
         else:
             var_fn = VARIATION_FUNCTIONS.get(type_id)
             if var_fn is None:
+                _ets = ['individual', 'entity', 'vessel', 'aircraft', 'country', 'unknown']
+                summary['by_type'][type_id] = {'generated': 0, 'skipped': 0, 'by_entity_type': {et: {'generated': 0, 'skipped': 0, 'reason': 'no_variation_function'} for et in _ets}}
                 continue
             meta = meta_by_id.get(type_id, {})
-            expected_outcome = meta.get('expected_outcome', 'Should Hit')
+            expected_outcome = type_def.expected_outcome
 
-        expected_result, rationale_prefix = outcome_to_result(expected_outcome)
+        entity_overrides = (request.outcome_overrides or {}).get(type_id, {})
 
-        # Sample candidate names
-        candidates = await _sample_names(
-            applicable_entity_types=type_def.applicable_entity_types,
-            min_tokens=type_def.applicable_min_tokens,
-            min_name_length=type_def.applicable_min_name_length,
-            count=request.count_per_type,
-            db=db,
-            distribution=request.culture_distribution,
-            custom_dist=request.custom_distribution,
-        )
+        # Iterate each applicable entity type separately so count_per_type
+        # applies per entity type, not across all entity types combined.
+        _all_ets = ['individual', 'entity', 'vessel', 'aircraft', 'country', 'unknown']
+        ets_to_sample = type_def.applicable_entity_types if type_def.applicable_entity_types else _all_ets
+        applicable_set = set(ets_to_sample)
 
         type_count = 0
         type_skips = 0
+        type_et_results = {}
 
-        for record in candidates:
-            if type_count >= request.count_per_type:
-                break
+        # Pre-populate non-applicable entity types in the log
+        for et in _all_ets:
+            if et not in applicable_set:
+                type_et_results[et] = {'generated': 0, 'skipped': 0, 'reason': 'not_applicable'}
 
-            name = record['cleaned_name']
-            try:
-                test_name, rationale_suffix = var_fn(name, record, rng)
-            except Exception as exc:
-                test_name = None
-                rationale_suffix = f"error: {exc}"
+        for et in ets_to_sample:
+            candidates = await _sample_names(
+                applicable_entity_types=[et],
+                min_tokens=type_def.applicable_min_tokens,
+                min_name_length=type_def.applicable_min_name_length,
+                count=request.count_per_type,
+                db=db,
+                distribution=request.culture_distribution,
+                custom_dist=request.custom_distribution,
+                primary_aka_filter=PRIMARY_AKA_FILTER_MAP.get(type_id),
+                watchlists=request.watchlists or None,
+            )
 
-            if test_name is None or test_name.strip() == name.strip():
-                type_skips += 1
-                reason = rationale_suffix
-                summary['skip_reasons'][reason] = summary['skip_reasons'].get(reason, 0) + 1
+            if not candidates:
+                type_et_results[et] = {'generated': 0, 'skipped': 0, 'reason': 'no_watchlist_data'}
                 continue
 
-            test_name = test_name.strip()
-            tc_id = f"{type_id}_{str(uuid.uuid4())[:8]}"
-            full_rationale = f"{rationale_prefix} — {rationale_suffix}"
+            final_outcome = entity_overrides.get(et, expected_outcome) if entity_overrides else expected_outcome
+            expected_result, rationale_prefix = outcome_to_result(final_outcome)
 
-            rows_to_insert.append((
-                tc_id,
-                f"{meta.get('type_name', type_id)} ({type_id})",
-                record['watchlist'],
-                record.get('sub_watchlist_1'),
-                record['cleaned_name'],
-                record['original_name'],
-                record.get('nationality'),
-                test_name,
-                record['primary_aka'],
-                record['entity_type'],
-                len(test_name.split()),
-                len(test_name),
-                expected_result,
-                full_rationale,
-            ))
-            type_count += 1
+            et_count = 0
+            et_skips = 0
+            for record in candidates:
+                if et_count >= request.count_per_type:
+                    break
 
-        summary['by_type'][type_id] = {'generated': type_count, 'skipped': type_skips}
+                name = record['cleaned_name']
+                try:
+                    test_name, rationale_suffix = var_fn(name, record, rng)
+                except Exception as exc:
+                    test_name = None
+                    rationale_suffix = f"error: {exc}"
+
+                same_name = test_name is not None and test_name.strip() == name.strip()
+                if test_name is None or (same_name and type_id not in PASSTHROUGH_TYPES):
+                    et_skips += 1
+                    type_skips += 1
+                    reason = rationale_suffix
+                    summary['skip_reasons'][reason] = summary['skip_reasons'].get(reason, 0) + 1
+                    continue
+
+                test_name = test_name.strip()
+                tc_id = f"{type_id}_{str(uuid.uuid4())[:8]}"
+                full_rationale = f"{rationale_prefix} — {rationale_suffix}"
+
+                rows_to_insert.append((
+                    tc_id,
+                    f"{meta.get('type_name', type_id)} ({type_id})",
+                    record['watchlist'],
+                    record.get('sub_watchlist_1'),
+                    record['cleaned_name'],
+                    record['original_name'],
+                    record.get('name_culture'),
+                    test_name,
+                    record['primary_aka'],
+                    record['entity_type'],
+                    len(test_name.split()),
+                    len(test_name),
+                    expected_result,
+                    full_rationale,
+                ))
+                et_count += 1
+                type_count += 1
+
+            if et_count == 0:
+                type_et_results[et] = {
+                    'generated': 0,
+                    'skipped': et_skips,
+                    'reason': 'all_names_skipped' if et_skips > 0 else 'no_watchlist_data',
+                }
+            else:
+                type_et_results[et] = {'generated': et_count, 'skipped': et_skips}
+
+        summary['by_type'][type_id] = {
+            'generated': type_count,
+            'skipped': type_skips,
+            'by_entity_type': type_et_results,
+        }
         summary['generated'] += type_count
         summary['skipped'] += type_skips
 

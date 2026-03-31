@@ -6,9 +6,10 @@ function filterParams(filters) {
   const p = new URLSearchParams()
   ;(filters.watchlists || []).forEach(w => p.append('watchlists', w))
   ;(filters.entity_types || []).forEach(e => p.append('entity_types', e))
-  ;(filters.nationalities || []).forEach(n => p.append('nationalities', n))
   if (filters.search) p.set('search', filters.search)
   if (filters.recently_modified_only) p.set('recently_modified_only', 'true')
+  if (filters.min_tokens != null) p.set('min_tokens', filters.min_tokens)
+  if (filters.max_tokens != null) p.set('max_tokens', filters.max_tokens)
   return p
 }
 
@@ -31,13 +32,19 @@ export const listsApi = {
 
   filterOptions: () => axios.get(`${BASE}/filters`),
 
-  inferNationalities: (watchlists = [], batchSize = 1000, llmEnabled = true) => {
+  nlFilter: (query) => axios.post(`${BASE}/nl-filter`, { query }),
+
+  overlap: () => axios.get(`${BASE}/overlap`),
+
+  inferCultures: (batchSize = 500) => {
     const p = new URLSearchParams()
-    watchlists.forEach(w => p.append('watchlists', w))
     p.set('batch_size', batchSize)
-    p.set('llm_enabled', llmEnabled)
-    return axios.post(`${BASE}/infer-nationalities?${p}`)
+    return axios.post(`${BASE}/infer-cultures?${p}`)
   },
 
-  inferStatus: () => axios.get(`${BASE}/infer-nationalities/status`),
+  inferCulturesStatus: () => axios.get(`${BASE}/infer-cultures/status`),
+
+  clearDatabase: () => axios.delete(`${BASE}/clear`),
+
+  cultures: () => axios.get(`${BASE}/cultures`),
 }

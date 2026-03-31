@@ -329,10 +329,10 @@ async def _save_session(session_id: str, state: dict, db: aiosqlite.Connection):
 
 
 async def _save_custom_type(proposed: dict, db: aiosqlite.Connection) -> str:
-    """Assign a TC_CUSTOM_xxx ID and persist to custom_test_types."""
+    """Assign a USER### ID and persist to custom_test_types."""
     async with db.execute("SELECT COUNT(*) FROM custom_test_types") as cur:
         count = (await cur.fetchone())[0]
-    type_id = f"TC_CUSTOM_{count + 1:03d}"
+    type_id = f"USER{count + 1:03d}"
     entity_types = '|'.join(proposed.get('applicable_entity_types', ['individual', 'entity']))
     await db.execute(
         """INSERT OR IGNORE INTO custom_test_types

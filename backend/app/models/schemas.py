@@ -16,9 +16,6 @@ class WatchlistEntry(BaseModel):
     entity_type: Literal["individual", "entity", "country", "vessel", "aircraft", "unknown"]
     num_tokens: int
     name_length: int
-    nationality: Optional[str] = None
-    nationality_confidence: Optional[Literal["HIGH", "MEDIUM", "LOW"]] = None
-    nationality_method: Optional[Literal["data_lookup", "heuristic", "llm"]] = None
     date_listed: Optional[date] = None
     recently_modified: bool = False
     sanctions_program: Optional[str] = None
@@ -45,9 +42,10 @@ class ListFilters(BaseModel):
     watchlists: list[str] = []
     sub_watchlists: list[str] = []
     entity_types: list[str] = []
-    nationalities: list[str] = []
     search: Optional[str] = None
     recently_modified_only: bool = False
+    min_tokens: Optional[int] = None
+    max_tokens: Optional[int] = None
     page: int = 1
     page_size: int = 100
 
@@ -90,6 +88,8 @@ class GenerationRequest(BaseModel):
     culture_distribution: Literal["balanced", "weighted", "custom"] = "balanced"
     custom_distribution: Optional[dict[str, float]] = None
     export_format: Literal["names_only", "pacs008", "pacs009", "fuf"] = "names_only"
+    outcome_overrides: Optional[dict[str, dict[str, str]]] = None  # type_id → entity_type → outcome
+    watchlists: list[str] = []  # empty = all watchlists
 
 
 # ── Results Interpreter ───────────────────────────────────────────────────────

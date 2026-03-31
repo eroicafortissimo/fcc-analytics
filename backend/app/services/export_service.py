@@ -99,6 +99,42 @@ _NOW_ISO = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
 _VALUE_DATE = date.today().strftime('%y%m%d')
 
 
+# ── Palette ────────────────────────────────────────────────────────────────────
+
+_NAVY        = '1A2744'
+_NAVY_LIGHT  = '243560'
+_WHITE       = 'FFFFFF'
+_SLATE_50    = 'F8FAFC'
+_SLATE_100   = 'F1F5F9'
+_SLATE_200   = 'E2E8F0'
+_SLATE_600   = '475569'
+
+# Per-outcome: (row bg, badge bg, badge font color)
+_OUTCOME_STYLE = {
+    'Must Hit':         ('FFF1F2', 'FEE2E2', 'BE123C'),
+    'Should Hit':       ('FFFBEB', 'FEF3C7', '92400E'),
+    'Testing Purposes': ('EFF6FF', 'DBEAFE', '1E40AF'),
+    'Should Not Hit':   (_SLATE_50,  _SLATE_100, _SLATE_600),
+}
+
+def _fill(hex6: str) -> PatternFill:
+    return PatternFill(fill_type='solid', fgColor=hex6)
+
+def _font(bold=False, size=10, color='000000', italic=False) -> Font:
+    return Font(bold=bold, size=size, color=color, italic=italic)
+
+def _border(color=_SLATE_200) -> Border:
+    s = Side(style='thin', color=color)
+    return Border(left=s, right=s, top=s, bottom=s)
+
+def _bottom_border(color=_SLATE_200) -> Border:
+    s = Side(style='thin', color=color)
+    return Border(bottom=s)
+
+def _align(h='left', v='center', wrap=False) -> Alignment:
+    return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+
+
 # ── 1. EXCEL EXPORT ────────────────────────────────────────────────────────────
 
 async def export_names_only(
@@ -106,7 +142,7 @@ async def export_names_only(
     expected_result: Optional[str] = None,
     entity_type: Optional[str] = None,
 ) -> bytes:
-    """Excel workbook: Test Cases sheet + Summary sheet."""
+    """Fully formatted Excel workbook: Test Cases + Summary sheets."""
     cases = await _load_cases(db, expected_result, entity_type)
 
     wb = openpyxl.Workbook()
@@ -114,98 +150,247 @@ async def export_names_only(
     # ── Sheet 1: Test Cases ──────────────────────────────────────────────────
     ws = wb.active
     ws.title = 'Test Cases'
+    ws.sheet_view.showGridLines = False
 
-    header_fill = PatternFill(fill_type='solid', fgColor='1E3A5F')
-    header_font = Font(bold=True, color='FFFFFF', size=10)
-    thin = Side(style='thin', color='D0D0D0')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    headers = [
-        'Test Case ID', 'Test Case Type', 'Watchlist', 'Sub-Watchlist',
-        'Cleaned Original Name', 'Original Original Name', 'Culture/Nationality',
-        'Test Name', 'Primary/AKA', 'Entity Type', '# Tokens', 'Name Length',
-        'Expected Result', 'Expected Result Rationale',
+    # Column definitions: (header label, width)
+    COLS = [
+        ('#',                        5),
+        ('Expected Result',         16),
+        ('Test Name',               38),
+        ('Original Name',           34),
+        ('Test Case Type',          34),
+        ('Watchlist',               14),
+        ('Entity Type',             13),
+        ('Culture / Nationality',   22),
+        ('P / AKA',                  8),
+        ('Tokens',                   7),
+        ('Length',                   7),
+        ('Test Case ID',            26),
+        ('Rationale',               62),
     ]
-    col_widths = [24, 36, 14, 20, 36, 36, 18, 36, 10, 12, 9, 12, 15, 60]
 
-    for col, (h, w) in enumerate(zip(headers, col_widths), 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        cell.border = border
-        ws.column_dimensions[get_column_letter(col)].width = w
+    # Apply column widths
+    for col_i, (_, w) in enumerate(COLS, 1):
+        ws.column_dimensions[get_column_letter(col_i)].width = w
 
-    ws.row_dimensions[1].height = 30
+    # ── Header row ──────────────────────────────────────────────────────────
+    ws.row_dimensions[1].height = 28
+    hdr_fill  = _fill(_NAVY)
+    hdr_font  = _font(bold=True, size=10, color=_WHITE)
+    hdr_align = _align('center')
+
+    for col_i, (label, _) in enumerate(COLS, 1):
+        cell = ws.cell(row=1, column=col_i, value=label)
+        cell.fill      = hdr_fill
+        cell.font      = hdr_font
+        cell.alignment = hdr_align
+
     ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = f'A1:{get_column_letter(len(COLS))}1'
 
-    hit_fill = PatternFill(fill_type='solid', fgColor='D1FAE5')  # light green
-    miss_fill = PatternFill(fill_type='solid', fgColor='FEE2E2')  # light red
-
+    # ── Data rows ───────────────────────────────────────────────────────────
+    hdr_count = len(COLS)
     for row_i, c in enumerate(cases, 2):
+        outcome   = c.get('expected_result') or ''
+        row_bg, badge_bg, badge_fg = _OUTCOME_STYLE.get(outcome, (_SLATE_50, _SLATE_100, _SLATE_600))
+
+        row_fill  = _fill(row_bg)
+        data_font = _font(size=10)
+        btm_bdr   = _bottom_border(_SLATE_200)
+
+        # Alternate very slightly for readability (every 5 rows darken 1 shade)
+        ws.row_dimensions[row_i].height = 18
+
         values = [
-            c['test_case_id'], c['test_case_type'], c['watchlist'],
-            c.get('sub_watchlist') or '', c['cleaned_original_name'],
-            c['original_original_name'], c.get('culture_nationality') or '',
-            c['test_name'], c.get('primary_aka') or '', c.get('entity_type') or '',
-            c.get('num_tokens') or '', c.get('name_length') or '',
-            c['expected_result'], c.get('expected_result_rationale') or '',
+            row_i - 1,                          # #
+            outcome,                             # Expected Result
+            c.get('test_name') or '',            # Test Name
+            c.get('cleaned_original_name') or '',# Original Name
+            c.get('test_case_type') or '',       # Test Case Type
+            c.get('watchlist') or '',            # Watchlist
+            (c.get('entity_type') or '').capitalize(),  # Entity Type
+            c.get('culture_nationality') or '',  # Culture
+            c.get('primary_aka') or '',          # P/AKA
+            c.get('num_tokens') or '',           # Tokens
+            c.get('name_length') or '',          # Length
+            c.get('test_case_id') or '',         # Test Case ID
+            c.get('expected_result_rationale') or '',  # Rationale
         ]
-        result_fill = hit_fill if c['expected_result'] == 'HIT' else miss_fill
-        for col, v in enumerate(values, 1):
-            cell = ws.cell(row=row_i, column=col, value=v)
-            cell.border = border
-            cell.alignment = Alignment(vertical='center', wrap_text=(col == len(headers)))
-            if col == 13:  # Expected Result column
-                cell.fill = result_fill
-                cell.font = Font(bold=True, size=10)
+
+        for col_i, v in enumerate(values, 1):
+            cell = ws.cell(row=row_i, column=col_i, value=v)
+            cell.fill      = row_fill
+            cell.border    = btm_bdr
+
+            if col_i == 1:   # row number
+                cell.font      = _font(size=9, color=_SLATE_600)
+                cell.alignment = _align('center')
+            elif col_i == 2:  # Expected Result badge
+                cell.fill      = _fill(badge_bg)
+                cell.font      = _font(bold=True, size=9, color=badge_fg)
+                cell.alignment = _align('center')
+            elif col_i == 3:  # Test Name — slightly bold
+                cell.font      = _font(bold=True, size=10)
+                cell.alignment = _align('left')
+            elif col_i in (10, 11):  # numeric cols
+                cell.font      = _font(size=10, color=_SLATE_600)
+                cell.alignment = _align('center')
+            elif col_i == hdr_count:  # Rationale — wrap
+                cell.font      = _font(size=9, color=_SLATE_600, italic=True)
+                cell.alignment = _align('left', wrap=True)
+                ws.row_dimensions[row_i].height = None  # auto height for wrapped rows
+            else:
+                cell.font      = data_font
+                cell.alignment = _align('left')
 
     # ── Sheet 2: Summary ─────────────────────────────────────────────────────
     ws2 = wb.create_sheet('Summary')
-    ws2.column_dimensions['A'].width = 28
-    ws2.column_dimensions['B'].width = 16
+    ws2.sheet_view.showGridLines = False
+    ws2.column_dimensions['A'].width = 32
+    ws2.column_dimensions['B'].width = 12
+    ws2.column_dimensions['C'].width = 12  # % column
+    ws2.column_dimensions['D'].width = 2   # spacer
 
-    def _summary_header(row, title):
-        cell = ws2.cell(row=row, column=1, value=title)
-        cell.font = Font(bold=True, size=11, color='1E3A5F')
-        ws2.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
+    r = 1  # current row pointer
 
-    def _row(row, label, value):
-        ws2.cell(row=row, column=1, value=label)
-        ws2.cell(row=row, column=2, value=value).alignment = Alignment(horizontal='right')
+    # Title banner
+    ws2.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+    title_cell = ws2.cell(row=r, column=1, value='Screening Test Case Export — Summary')
+    title_cell.fill      = _fill(_NAVY)
+    title_cell.font      = _font(bold=True, size=14, color=_WHITE)
+    title_cell.alignment = _align('left', v='center')
+    ws2.row_dimensions[r].height = 36
+    r += 1
 
-    _summary_header(1, 'Export Summary')
-    _row(2, 'Total test cases', len(cases))
-    _row(3, 'Generated at', datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC'))
-    if expected_result:
-        _row(4, 'Filter: Expected result', expected_result)
-    if entity_type:
-        _row(5, 'Filter: Entity type', entity_type)
+    # Metadata sub-header
+    ws2.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+    gen_time = datetime.utcnow().strftime('%d %B %Y  %H:%M UTC')
+    meta_cell = ws2.cell(row=r, column=1, value=f'Generated  {gen_time}   ·   {len(cases):,} test cases')
+    meta_cell.fill      = _fill(_NAVY_LIGHT)
+    meta_cell.font      = _font(size=10, color='CBD5E1')
+    meta_cell.alignment = _align('left', v='center')
+    ws2.row_dimensions[r].height = 22
+    r += 1
 
-    _summary_header(7, 'By Expected Result')
+    if expected_result or entity_type:
+        ws2.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+        filt_parts = []
+        if expected_result: filt_parts.append(f'Outcome: {expected_result}')
+        if entity_type:     filt_parts.append(f'Entity type: {entity_type}')
+        f_cell = ws2.cell(row=r, column=1, value='Filters applied:  ' + '   ·   '.join(filt_parts))
+        f_cell.fill      = _fill('FEF3C7')
+        f_cell.font      = _font(size=9, color='92400E')
+        f_cell.alignment = _align('left', v='center')
+        ws2.row_dimensions[r].height = 18
+        r += 1
+
+    r += 1  # blank spacer
+
+    def _section_title(row, title):
+        ws2.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+        c = ws2.cell(row=row, column=1, value=title)
+        c.fill      = _fill(_SLATE_100)
+        c.font      = _font(bold=True, size=10, color=_NAVY)
+        c.alignment = _align('left', v='center')
+        ws2.row_dimensions[row].height = 20
+        # bottom border
+        for col in range(1, 4):
+            ws2.cell(row=row, column=col).border = _bottom_border(_NAVY)
+
+    def _col_headers(row, labels):
+        for ci, lbl in enumerate(labels, 1):
+            c = ws2.cell(row=row, column=ci, value=lbl)
+            c.fill      = _fill(_SLATE_200)
+            c.font      = _font(bold=True, size=9, color=_SLATE_600)
+            c.alignment = _align('center' if ci > 1 else 'left', v='center')
+            c.border    = _bottom_border(_SLATE_200)
+        ws2.row_dimensions[row].height = 16
+
+    def _data_row(row, label, count, total, row_bg=None, lbl_color='000000', bold_label=False):
+        pct = f'{count / total * 100:.1f}%' if total else '—'
+        cells_data = [(1, label), (2, count), (3, pct)]
+        bg = row_bg or _SLATE_50
+        for ci, val in cells_data:
+            c = ws2.cell(row=row, column=ci, value=val)
+            c.fill      = _fill(bg)
+            c.font      = _font(bold=(bold_label and ci == 1) or ci == 2, size=10,
+                                color=lbl_color if ci == 1 else ('000000' if ci == 2 else _SLATE_600))
+            c.alignment = _align('right' if ci > 1 else 'left', v='center')
+            c.border    = _bottom_border(_SLATE_200)
+        ws2.row_dimensions[row].height = 18
+
+    total = len(cases)
+
+    # ── By Expected Result ───────────────────────────────────────────────────
+    _section_title(r, 'By Expected Result')
+    r += 1
+    _col_headers(r, ['Outcome', 'Count', '%'])
+    r += 1
+
     by_result: dict[str, int] = {}
     for c in cases:
-        by_result[c['expected_result']] = by_result.get(c['expected_result'], 0) + 1
-    for ri, (k, v) in enumerate(sorted(by_result.items()), 8):
-        _row(ri, k, v)
+        k = c['expected_result']
+        by_result[k] = by_result.get(k, 0) + 1
 
-    row_base = 8 + len(by_result) + 2
-    _summary_header(row_base, 'By Entity Type')
-    by_et: dict[str, int] = {}
-    for c in cases:
-        et = c.get('entity_type') or 'unknown'
-        by_et[et] = by_et.get(et, 0) + 1
-    for ri, (k, v) in enumerate(sorted(by_et.items(), key=lambda x: -x[1]), row_base + 1):
-        _row(ri, k, v)
+    outcome_order = ['Must Hit', 'Should Hit', 'Testing Purposes', 'Should Not Hit']
+    for outcome in outcome_order:
+        if outcome not in by_result:
+            continue
+        cnt = by_result[outcome]
+        _, badge_bg, badge_fg = _OUTCOME_STYLE.get(outcome, (_SLATE_50, _SLATE_100, _SLATE_600))
+        _data_row(r, outcome, cnt, total, row_bg=badge_bg, lbl_color=badge_fg, bold_label=True)
+        r += 1
 
-    row_base2 = row_base + 1 + len(by_et) + 2
-    _summary_header(row_base2, 'By Watchlist')
+    r += 1  # spacer
+
+    # ── By Watchlist ─────────────────────────────────────────────────────────
+    _section_title(r, 'By Watchlist')
+    r += 1
+    _col_headers(r, ['Watchlist', 'Count', '%'])
+    r += 1
+
     by_wl: dict[str, int] = {}
     for c in cases:
-        wl = c.get('watchlist') or 'unknown'
-        by_wl[wl] = by_wl.get(wl, 0) + 1
-    for ri, (k, v) in enumerate(sorted(by_wl.items(), key=lambda x: -x[1]), row_base2 + 1):
-        _row(ri, k, v)
+        k = c.get('watchlist') or 'Unknown'
+        by_wl[k] = by_wl.get(k, 0) + 1
+
+    for k, cnt in sorted(by_wl.items(), key=lambda x: -x[1]):
+        _data_row(r, k, cnt, total)
+        r += 1
+
+    r += 1  # spacer
+
+    # ── By Entity Type ───────────────────────────────────────────────────────
+    _section_title(r, 'By Entity Type')
+    r += 1
+    _col_headers(r, ['Entity Type', 'Count', '%'])
+    r += 1
+
+    by_et: dict[str, int] = {}
+    for c in cases:
+        k = (c.get('entity_type') or 'unknown').capitalize()
+        by_et[k] = by_et.get(k, 0) + 1
+
+    for k, cnt in sorted(by_et.items(), key=lambda x: -x[1]):
+        _data_row(r, k, cnt, total)
+        r += 1
+
+    r += 1  # spacer
+
+    # ── By Test Case Type (top 20) ───────────────────────────────────────────
+    _section_title(r, 'By Test Case Type  (top 20)')
+    r += 1
+    _col_headers(r, ['Test Case Type', 'Count', '%'])
+    r += 1
+
+    by_type: dict[str, int] = {}
+    for c in cases:
+        k = c.get('test_case_type') or 'Unknown'
+        by_type[k] = by_type.get(k, 0) + 1
+
+    for k, cnt in sorted(by_type.items(), key=lambda x: -x[1])[:20]:
+        _data_row(r, k, cnt, total)
+        r += 1
 
     buf = io.BytesIO()
     wb.save(buf)

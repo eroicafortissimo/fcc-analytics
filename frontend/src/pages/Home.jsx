@@ -1,75 +1,110 @@
 import { Link } from 'react-router-dom'
 
-const FEATURES = [
-  {
-    to: '/lists',
-    title: 'List Explorer',
-    icon: '🗂',
-    description:
-      'Download and analyze OFAC SDN, EU Consolidated, UK HMT, BIS Entity List, and Japan METI sanctions lists. ' +
-      'Browse entries with intelligent nationality inference, filters, and interactive charts.',
-    color: 'border-blue-500',
-    btn: 'bg-blue-600 hover:bg-blue-700',
-  },
-  {
-    to: '/testcases',
-    title: 'Test Case Generator',
-    icon: '🧪',
-    description:
-      'Generate hundreds of intelligent name variation test cases — transpositions, truncations, transliterations, ' +
-      'phonetic equivalents, and more — with expected HIT/MISS results. Export as Excel, SWIFT pacs.008/009, or FUF.',
-    color: 'border-green-500',
-    btn: 'bg-green-600 hover:bg-green-700',
-  },
-  {
-    to: '/results',
-    title: 'Results Interpreter',
-    icon: '📊',
-    description:
-      'Upload your screening system\'s results and get a full statistical analysis: confusion matrix, detection rate, ' +
-      'false positive rate, breakdowns by test type and culture, plus AI-powered miss analysis for false negatives.',
-    color: 'border-purple-500',
-    btn: 'bg-purple-600 hover:bg-purple-700',
-  },
-]
+function SectionDivider({ label, color }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className={`w-2.5 h-2.5 rounded-sm shrink-0 ${color}`} />
+      <span className="text-xs font-bold text-slate-600 uppercase tracking-widest whitespace-nowrap">
+        {label}
+      </span>
+      <div className="flex-1 h-px bg-slate-200" />
+    </div>
+  )
+}
+
+function ToolCard({ to, title, description, accent }) {
+  return (
+    <Link
+      to={to}
+      className={`bg-white rounded-xl border border-slate-200 border-l-4 ${accent}
+                  p-6 flex flex-col hover:shadow-md transition-shadow group`}
+    >
+      <h3 className="text-base font-semibold text-slate-800 mb-2 group-hover:text-slate-900">
+        {title}
+      </h3>
+      <p className="text-slate-500 text-sm flex-1 leading-relaxed mb-4">{description}</p>
+      <span className="text-xs font-medium text-slate-400 group-hover:text-slate-600 transition-colors">
+        Open →
+      </span>
+    </Link>
+  )
+}
 
 export default function Home() {
   return (
-    <div className="max-w-5xl mx-auto py-10">
-      <div className="text-center mb-12">
-        <h1 className="text-4xl font-bold text-slate-900 mb-4">
-          Screening Validation Platform
-        </h1>
-        <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-          A full-stack sanctions screening validation toolkit. Download and explore global watchlists,
-          generate intelligent test cases covering hundreds of name variation types, then analyze
-          your screening system's performance to identify gaps and biases.
+    <div className="max-w-4xl mx-auto py-10 space-y-7">
+
+      {/* Header */}
+      <div className="text-center mb-4">
+        <h1 className="text-4xl font-bold text-slate-900 mb-3">Sanctions Module</h1>
+        <p className="text-slate-500 max-w-lg mx-auto text-sm leading-relaxed">
+          Sanctions screening validation toolkit — explore watchlists and transactions,
+          generate test cases, interpret results, and reconcile public and private lists.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {FEATURES.map(({ to, title, icon, description, color, btn }) => (
-          <div
-            key={to}
-            className={`bg-white rounded-xl border-t-4 ${color} shadow-sm p-6 flex flex-col`}
-          >
-            <div className="text-4xl mb-3">{icon}</div>
-            <h2 className="text-xl font-semibold text-slate-800 mb-2">{title}</h2>
-            <p className="text-slate-500 text-sm flex-1 mb-5">{description}</p>
-            <Link
-              to={to}
-              className={`${btn} text-white text-sm font-medium px-4 py-2 rounded-lg text-center transition-colors`}
-            >
-              Open {title}
-            </Link>
-          </div>
-        ))}
+      {/* Explorer */}
+      <div className="space-y-4">
+        <SectionDivider label="Explorer" color="bg-blue-600" />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <ToolCard
+            to="/screeniq/lists"
+            title="Watchlist Explorer"
+            description="Download and analyze OFAC SDN, EU Consolidated, UK HMT, BIS Entity List, and Japan METI sanctions lists with nationality inference, filters, and interactive charts."
+            accent="border-l-blue-600"
+          />
+          <ToolCard
+            to="/screeniq/transactions"
+            title="Transaction Explorer"
+            description="Upload a CSV or Excel file of transaction names and entities to analyze distributions of countries, entity types, token counts, and name lengths."
+            accent="border-l-blue-600"
+          />
+        </div>
       </div>
 
-      <div className="mt-12 bg-slate-100 rounded-xl p-6 text-sm text-slate-500">
-        <strong className="text-slate-700">Tech stack:</strong>{' '}
-        React · FastAPI · LangChain / LangGraph · Claude API · SQLite · Recharts
+      {/* Tuning Tools */}
+      <div className="space-y-4">
+        <SectionDivider label="Tuning Tools" color="bg-red-500" />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <ToolCard
+            to="/screeniq/testcases"
+            title="Test Case Generator"
+            description="Generate hundreds of intelligent name variation test cases — transpositions, truncations, transliterations, phonetic equivalents, and more. Export as Excel, SWIFT, or FUF."
+            accent="border-l-red-500"
+          />
+          <ToolCard
+            to="/screeniq/results"
+            title="Results Interpreter"
+            description="Upload your screening results for a full statistical analysis: confusion matrix, detection rate, false positive rate, breakdowns by type and culture, and AI-powered miss analysis."
+            accent="border-l-red-500"
+          />
+        </div>
       </div>
+
+      {/* List Management */}
+      <div className="space-y-4">
+        <SectionDivider label="List Management" color="bg-violet-600" />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <ToolCard
+            to="/screeniq/reconciliation"
+            title="List Reconciliation"
+            description="Upload your private screening list and reconcile it against public watchlists. Identify coverage gaps (public entries missing from your list) and private extras across three matching tiers: exact, expanded, and AI."
+            accent="border-l-violet-600"
+          />
+          <ToolCard
+            to="/screeniq/list-update-manager"
+            title="List Update Manager"
+            description="Track daily changes across OFAC and global sanctions watchlists. Surface additions, deletions, and modifications the moment they happen. Configure automated sync schedules and review full change history."
+            accent="border-l-violet-600"
+          />
+        </div>
+      </div>
+
+      {/* Tech stack */}
+      <p className="text-xs text-center text-slate-400 pt-2">
+        React · FastAPI · LangChain / LangGraph · Claude API · SQLite · Recharts
+      </p>
+
     </div>
   )
 }

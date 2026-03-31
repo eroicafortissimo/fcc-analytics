@@ -81,6 +81,16 @@ def _normalise_result(raw: str) -> Optional[str]:
     return None
 
 
+def _normalise_expected(raw: str) -> str:
+    """Convert test case expected_result labels (Must Hit / Should Not Hit) to HIT / MISS."""
+    v = raw.strip()
+    if v in ('Must Hit', 'Should Hit', 'HIT'):
+        return 'HIT'
+    if v in ('Should Not Hit', 'MISS'):
+        return 'MISS'
+    return 'MISS'  # 'Testing Purposes' etc.
+
+
 # ── Core service functions ─────────────────────────────────────────────────────
 
 async def ingest_results(file, db: aiosqlite.Connection) -> dict:
@@ -101,6 +111,8 @@ async def ingest_results(file, db: aiosqlite.Connection) -> dict:
     _TC_ID_KEYS = ('test_case_id', 'id', 'tcid', 'tc_id', 'case_id')
     _ACTUAL_KEYS = ('actual_result', 'actual', 'result', 'screening_result',
                     'system_result', 'hit_miss', 'outcome')
+    _NAME_KEYS = ('test_name', 'name', 'screened_name', 'party_name',
+                  'customer_name', 'entity_name', 'subject_name')
 
     def _get(row, keys):
         for k in keys:
@@ -109,32 +121,47 @@ async def ingest_results(file, db: aiosqlite.Connection) -> dict:
                 return v
         return ''
 
-    stats = {'total_rows': len(rows), 'matched': 0, 'unmatched': 0, 'skipped_bad_result': 0}
+    stats = {'total_rows': len(rows), 'matched': 0, 'unmatched': 0,
+             'skipped_bad_result': 0, 'matched_by_name': 0}
     to_upsert: list[tuple] = []
 
     for row in rows:
         tc_id = _get(row, _TC_ID_KEYS)
         actual_raw = _get(row, _ACTUAL_KEYS)
-        if not tc_id:
-            stats['unmatched'] += 1
-            continue
+
         actual = _normalise_result(actual_raw)
         if actual is None:
             stats['skipped_bad_result'] += 1
             continue
 
-        # Look up test case for expected_result + test_name
-        async with db.execute(
-            "SELECT expected_result, test_name FROM test_cases WHERE test_case_id = ?",
-            (tc_id,),
-        ) as cur:
-            tc_row = await cur.fetchone()
+        tc_row = None
+
+        # Primary: match by test_case_id
+        if tc_id:
+            async with db.execute(
+                "SELECT test_case_id, expected_result, test_name FROM test_cases WHERE test_case_id = ?",
+                (tc_id,),
+            ) as cur:
+                tc_row = await cur.fetchone()
+
+        # Fallback: match by test_name (case-insensitive) when tc_id absent or not found
+        if tc_row is None:
+            name_raw = _get(row, _NAME_KEYS)
+            if name_raw:
+                async with db.execute(
+                    "SELECT test_case_id, expected_result, test_name FROM test_cases WHERE test_name = ? COLLATE NOCASE LIMIT 1",
+                    (name_raw,),
+                ) as cur:
+                    tc_row = await cur.fetchone()
+                if tc_row:
+                    tc_id = tc_row[0]
+                    stats['matched_by_name'] += 1
 
         if not tc_row:
             stats['unmatched'] += 1
             continue
 
-        expected, test_name = tc_row[0], tc_row[1]
+        expected, test_name = _normalise_expected(tc_row[1]), tc_row[2]
 
         score = _get(row, ('match_score', 'score', 'similarity', 'confidence'))
         try:

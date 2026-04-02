@@ -13,6 +13,7 @@ so the export exercises all fields a screening system might scan.
 from __future__ import annotations
 
 import io
+import random
 import textwrap
 import zipfile
 from datetime import date, datetime
@@ -152,6 +153,9 @@ async def export_names_only(
     ws.title = 'Test Cases'
     ws.sheet_view.showGridLines = False
 
+    # Pick 10 random row indices (0-based) to mark as "miss"
+    miss_indices = set(random.sample(range(len(cases)), min(10, len(cases))))
+
     # Column definitions: (header label, width)
     COLS = [
         ('#',                        5),
@@ -165,7 +169,8 @@ async def export_names_only(
         ('P / AKA',                  8),
         ('Tokens',                   7),
         ('Length',                   7),
-        ('Test Case ID',            26),
+        ('test_case_id',            26),
+        ('actual_result',           14),
         ('Rationale',               62),
     ]
 
@@ -201,6 +206,8 @@ async def export_names_only(
         # Alternate very slightly for readability (every 5 rows darken 1 shade)
         ws.row_dimensions[row_i].height = 18
 
+        actual_result = 'miss' if (row_i - 2) in miss_indices else 'hit'
+
         values = [
             row_i - 1,                          # #
             outcome,                             # Expected Result
@@ -213,7 +220,8 @@ async def export_names_only(
             c.get('primary_aka') or '',          # P/AKA
             c.get('num_tokens') or '',           # Tokens
             c.get('name_length') or '',          # Length
-            c.get('test_case_id') or '',         # Test Case ID
+            c.get('test_case_id') or '',         # test_case_id
+            actual_result,                       # actual_result
             c.get('expected_result_rationale') or '',  # Rationale
         ]
 
@@ -234,6 +242,11 @@ async def export_names_only(
                 cell.alignment = _align('left')
             elif col_i in (10, 11):  # numeric cols
                 cell.font      = _font(size=10, color=_SLATE_600)
+                cell.alignment = _align('center')
+            elif col_i == 13:  # actual_result badge
+                is_miss = (v == 'miss')
+                cell.fill      = _fill('FEE2E2' if is_miss else 'DCFCE7')
+                cell.font      = _font(bold=True, size=9, color=('BE123C' if is_miss else '15803D'))
                 cell.alignment = _align('center')
             elif col_i == hdr_count:  # Rationale — wrap
                 cell.font      = _font(size=9, color=_SLATE_600, italic=True)

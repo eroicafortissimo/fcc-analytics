@@ -4,6 +4,7 @@ Routes: /api/threshold/...
 """
 from __future__ import annotations
 import json
+from datetime import timedelta
 from typing import Optional
 
 import pandas as pd
@@ -395,15 +396,16 @@ async def run_analysis(body: AnalysisRequest, db: aiosqlite.Connection = Depends
     """Run statistical analysis on filtered/aggregated data for a chosen column."""
     mem = await _get_mem(body.dataset_id, db)
 
-    df = svc.apply_filters(mem["df"], body.filter_rules)
-    if len(df) == 0:
+    raw_df = svc.apply_filters(mem["df"], body.filter_rules)
+    if len(raw_df) == 0:
         raise HTTPException(status_code=400, detail="No rows match the current filters")
 
     # Aggregation
-    if body.analysis_type == "aggregate" and body.aggregation_key and body.aggregation_amount:
+    is_aggregate = body.analysis_type == "aggregate" and body.aggregation_key and body.aggregation_amount
+    if is_aggregate:
         try:
             df = svc.aggregate_transactions(
-                df,
+                raw_df,
                 key_column=body.aggregation_key,
                 amount_column=body.aggregation_amount,
                 period=body.aggregation_period,
@@ -414,6 +416,7 @@ async def run_analysis(body: AnalysisRequest, db: aiosqlite.Connection = Depends
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Aggregation error: {e}")
     else:
+        df = raw_df
         analysis_column = body.parameter_column
 
     if not analysis_column or analysis_column not in df.columns:
@@ -431,13 +434,13 @@ async def run_analysis(body: AnalysisRequest, db: aiosqlite.Connection = Depends
         trim_tranches = []
     else:
         stats = svc.compute_statistics(series)
-        s_trim_mild = stats.pop("_s_trim_mild", None)  # extract before JSON serialization
+        s_trim_mild = stats.pop("_s_trim_mild", None)
         boundaries = body.boundaries or svc.auto_tranches(series)
         tranches = svc.tranche_distribution(series, boundaries)
         trim_tranches = svc.tranche_distribution(s_trim_mild, boundaries) if s_trim_mild is not None else []
         dist = {}
 
-    # Save to DB — also persist the series values so simulate works after server restart
+    # Save to DB
     param_col = body.parameter_column or analysis_column
     series_values = pd.to_numeric(series, errors="coerce").dropna().tolist()
     key_values = df[body.aggregation_key].tolist() if body.aggregation_key and body.aggregation_key in df.columns else []
@@ -458,23 +461,92 @@ async def run_analysis(body: AnalysisRequest, db: aiosqlite.Connection = Depends
         analysis_id = cur.lastrowid
     await db.commit()
 
-    # Sample up to 800 values for the scatter plot (random sample if larger)
+    # Sample up to 800 values for scatter plot
     s_num_all = pd.to_numeric(series, errors="coerce").dropna()
     sample = s_num_all.sample(min(800, len(s_num_all)), random_state=42).tolist() if len(s_num_all) else []
 
+    # ── Applicable events (tab 2) ───────────────────────────────────────────
+    tid_col = next((c for c in ["transaction_id", "txn_id", "id", "reference_id"] if c in raw_df.columns), None)
+
+    # Detect rolling window mode
+    period = body.aggregation_period or "none"
+    is_rolling = period.startswith("rolling_") or period.startswith("custom_")
+    rolling_days = None
+    if is_rolling:
+        try:
+            rolling_days = int(period.split("_")[1])
+        except (IndexError, ValueError):
+            is_rolling = False
+
+    if is_aggregate:
+        events_out = []
+        for _, row in df.iterrows():
+            ekey = row.get(body.aggregation_key)
+            date_start = date_end = days = None
+
+            if is_rolling and rolling_days and body.aggregation_date and body.aggregation_date in raw_df.columns:
+                # Rolling window: each df row is one transaction's window anchored at row[date_column]
+                window_end = pd.Timestamp(row[body.aggregation_date])
+                window_start = window_end - timedelta(days=rolling_days)
+                raw_dates = pd.to_datetime(raw_df[body.aggregation_date], errors="coerce")
+                entity_rows = raw_df[
+                    (raw_df[body.aggregation_key] == ekey) &
+                    (raw_dates >= window_start) &
+                    (raw_dates <= window_end)
+                ]
+                date_start = str(window_start.date())
+                date_end = str(window_end.date())
+                days = rolling_days
+            else:
+                entity_rows = raw_df[raw_df[body.aggregation_key] == ekey]
+                if body.aggregation_date and body.aggregation_date in entity_rows.columns:
+                    dates = pd.to_datetime(entity_rows[body.aggregation_date], errors="coerce").dropna()
+                    if len(dates):
+                        date_start = str(dates.min().date())
+                        date_end = str(dates.max().date())
+                        days = int((dates.max() - dates.min()).days + 1)
+
+            tids = entity_rows[tid_col].astype(str).tolist() if tid_col else [str(i) for i in entity_rows.index.tolist()]
+            events_out.append({
+                "key":             str(ekey) if ekey is not None else "",
+                "date_start":      date_start,
+                "date_end":        date_end,
+                "days":            days,
+                "sum":             round(float(row["agg_value"]), 2),
+                "count":           int(len(entity_rows)),
+                "transaction_ids": tids,
+            })
+        events_out.sort(key=lambda x: x["sum"], reverse=True)
+        events_out = events_out[:500]
+    else:
+        raw_sample = raw_df.head(500).copy()
+        raw_sample.insert(0, "_row", range(1, len(raw_sample) + 1))
+        events_out = raw_sample.fillna("").astype(str).to_dict("records")
+
+    # Raw transactions for tab 3 (all filtered, not aggregated)
+    raw_tx = raw_df.head(2000).copy()
+    raw_tx.insert(0, "_row", range(1, len(raw_tx) + 1))
+    raw_transactions = raw_tx.fillna("").astype(str).to_dict("records")
+    raw_columns = ["_row"] + list(raw_df.columns)
+
     return {
-        "analysis_id": analysis_id,
-        "matched_rows": len(df),
-        "original_rows": len(mem["df"]),
-        "column": param_col,
-        "is_categorical": is_categorical,
-        "statistics": stats,
-        "boundaries": boundaries,
-        "tranches": tranches,
-        "trim_tranches": trim_tranches,
+        "analysis_id":      analysis_id,
+        "matched_rows":     len(raw_df),
+        "original_rows":    len(mem["df"]),
+        "column":           param_col,
+        "is_categorical":   is_categorical,
+        "statistics":       stats,
+        "boundaries":       boundaries,
+        "tranches":         tranches,
+        "trim_tranches":    trim_tranches,
         "categorical_dist": dist,
-        "analysis_type": body.analysis_type,
-        "sample_values": sample,
+        "analysis_type":    body.analysis_type,
+        "sample_values":    sample,
+        "events":           events_out,
+        "raw_transactions": raw_transactions,
+        "raw_columns":      raw_columns,
+        "agg_key_col":      body.aggregation_key if is_aggregate else None,
+        "tid_col":          tid_col,
     }
 
 

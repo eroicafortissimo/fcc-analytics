@@ -103,12 +103,21 @@ export default function ThresholdSetting() {
   const [analysisResult, setAnalysisResult] = useState(null)
   const [analysisLoading, setAnalysisLoading] = useState(false)
   const [analysisId, setAnalysisId] = useState(null)
+  const [analysisTab, setAnalysisTab] = useState(0)   // 0=stats 1=events 2=transactions
+  const [selectedEvent, setSelectedEvent] = useState(null)
+  const [eventsSort, setEventsSort] = useState({ col: null, dir: 'asc' })
+  const [txSort, setTxSort] = useState({ col: null, dir: 'asc' })
 
   // Step 4 — Simulate
   const [thresholdInputs, setThresholdInputs] = useState(['', '', ''])
   const [simResult, setSimResult] = useState(null)
   const [simLoading, setSimLoading] = useState(false)
   const [autoLoading, setAutoLoading] = useState(false)
+  const [simTab, setSimTab] = useState(0)
+  const [selectedSimThreshold, setSelectedSimThreshold] = useState(null)
+  const [selectedSimEvent, setSelectedSimEvent] = useState(null)
+  const [simAlertsSort, setSimAlertsSort] = useState({ col: null, dir: 'asc' })
+  const [simTxSort, setSimTxSort] = useState({ col: null, dir: 'asc' })
 
   // Step 5 — Report
   const [reportText, setReportText] = useState('')
@@ -266,7 +275,17 @@ export default function ThresholdSetting() {
         column: d.column,
         is_categorical: d.is_categorical,
         sample_values: d.sample_values || [],
+        events: d.events || [],
+        raw_transactions: d.raw_transactions || [],
+        raw_columns: d.raw_columns || [],
+        agg_key_col: d.agg_key_col || null,
+        analysis_type: d.analysis_type || 'single',
+        tid_col: d.tid_col || null,
       })
+      setAnalysisTab(0)
+      setSelectedEvent(null)
+      setEventsSort({ col: null, dir: 'asc' })
+      setTxSort({ col: null, dir: 'asc' })
       setAnalysisId(d.analysis_id)
       setStep(3)
     } catch (err) {
@@ -311,6 +330,11 @@ export default function ThresholdSetting() {
       const recThreshold = d.recommendation?.threshold
       const recRow = results.find(r => r.threshold === recThreshold) || null
       setSimResult({ results, recommendation: recRow })
+      setSimTab(0)
+      setSelectedSimThreshold(null)
+      setSelectedSimEvent(null)
+      setSimAlertsSort({ col: null, dir: 'asc' })
+      setSimTxSort({ col: null, dir: 'asc' })
       setStep(4)
     } catch (err) {
       alert(err?.response?.data?.detail || 'Simulation failed')
@@ -681,13 +705,188 @@ export default function ThresholdSetting() {
   const renderStep3 = () => {
     if (!analysisResult) return null
     const { stats, tranches, cdf, categorical } = analysisResult
+    const { events = [], raw_transactions = [], raw_columns = [], agg_key_col, analysis_type, tid_col } = analysisResult
+    const isAggregate = analysis_type === 'aggregate' && agg_key_col
+
+    // Transactions for tab 2 — filtered by selected event if any
+    const visibleTx = (() => {
+      if (!selectedEvent) return raw_transactions
+      // Prefer filtering by exact transaction IDs (rolling window events carry them)
+      if (selectedEvent.transaction_ids?.length && tid_col) {
+        const idSet = new Set(selectedEvent.transaction_ids)
+        return raw_transactions.filter(r => idSet.has(r[tid_col]))
+      }
+      // Fallback: filter by entity key
+      if (agg_key_col) return raw_transactions.filter(r => r[agg_key_col] === selectedEvent.key)
+      return raw_transactions
+    })()
+
+    // Sort helpers
+    const applySort = (arr, sortState, numericCols = []) => {
+      if (!sortState.col) return arr
+      return [...arr].sort((a, b) => {
+        let av = a[sortState.col], bv = b[sortState.col]
+        if (av == null) av = ''; if (bv == null) bv = ''
+        const an = parseFloat(av), bn = parseFloat(bv)
+        const cmp = (numericCols.includes(sortState.col) || (!isNaN(an) && !isNaN(bn)))
+          ? an - bn
+          : String(av).localeCompare(String(bv))
+        return sortState.dir === 'asc' ? cmp : -cmp
+      })
+    }
+    const toggleEvSort = col => setEventsSort(prev =>
+      prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
+    const toggleTxSort = col => setTxSort(prev =>
+      prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
+    const SortIcon = ({ col, s }) => s.col !== col
+      ? <span className="opacity-30 ml-1 text-[10px]">⇅</span>
+      : <span className="text-teal-600 ml-1 text-[10px]">{s.dir === 'asc' ? '▲' : '▼'}</span>
+
+    const sortedEvents = applySort(events, eventsSort, ['days', 'sum', 'count'])
+    const sortedTx = applySort(visibleTx, txSort)
 
     return (
       <div className="space-y-5">
-        <div className="flex items-center gap-4 text-xs text-slate-500">
-          <span>Column: <strong className="text-slate-700">{analysisResult.column}</strong></span>
-          <span>Matched: <strong className="text-teal-700">{analysisResult.matched_rows?.toLocaleString()}</strong> of {analysisResult.original_rows?.toLocaleString()} rows</span>
+        {/* Sub-tab bar */}
+        <div className="flex items-center gap-0 border-b border-slate-200">
+          {[
+            ['Statistics', 0],
+            [`Applicable events (${events.length})`, 1],
+            ['Full transactions', 2],
+          ].map(([label, idx]) => (
+            <button key={idx} onClick={() => setAnalysisTab(idx)}
+              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px
+                ${analysisTab === idx
+                  ? 'border-teal-600 text-teal-700'
+                  : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+              {label}
+            </button>
+          ))}
+          <div className="ml-auto flex items-center gap-4 text-xs text-slate-500 pb-2">
+            <span>Column: <strong className="text-slate-700">{analysisResult.column}</strong></span>
+            <span>Matched: <strong className="text-teal-700">{analysisResult.matched_rows?.toLocaleString()}</strong> of {analysisResult.original_rows?.toLocaleString()} rows</span>
+          </div>
         </div>
+
+        {/* ── Tab 1: Applicable Events ── */}
+        {analysisTab === 1 && (
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+              <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">
+                {isAggregate ? `Applicable events — grouped by ${agg_key_col}` : 'Applicable transactions'}
+              </p>
+              <p className="text-xs text-slate-400">Click a row to filter full transactions tab</p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide whitespace-nowrap">
+                  {isAggregate ? (
+                    <tr>
+                      <th className="px-4 py-2 text-right w-10">#</th>
+                      {[
+                        ['key', agg_key_col, 'text-left'],
+                        ['date_start', 'Start date', 'text-right'],
+                        ['date_end', 'End date', 'text-right'],
+                        ['days', 'Days', 'text-right'],
+                        ['sum', 'Sum', 'text-right'],
+                        ['count', 'Count', 'text-right'],
+                      ].map(([col, label, align]) => (
+                        <th key={col} onClick={() => toggleEvSort(col)}
+                          className={`px-4 py-2 ${align} cursor-pointer select-none hover:text-slate-700 whitespace-nowrap`}>
+                          {label}<SortIcon col={col} s={eventsSort} />
+                        </th>
+                      ))}
+                      <th className="px-4 py-2 text-left">Transaction IDs</th>
+                    </tr>
+                  ) : (
+                    <tr>
+                      {raw_columns.map(c => (
+                        <th key={c} onClick={() => toggleEvSort(c)}
+                          className="px-3 py-2 text-left whitespace-nowrap cursor-pointer select-none hover:text-slate-700">
+                          {c}<SortIcon col={c} s={eventsSort} />
+                        </th>
+                      ))}
+                    </tr>
+                  )}
+                </thead>
+                <tbody>
+                  {isAggregate ? sortedEvents.map((ev, i) => {
+                    const isSelected = selectedEvent?.key === ev.key && selectedEvent?.date_start === ev.date_start
+                    const tidDisplay = ev.transaction_ids?.slice(0, 3).join(', ') + (ev.transaction_ids?.length > 3 ? ` +${ev.transaction_ids.length - 3} more` : '')
+                    return (
+                      <tr key={i}
+                        onClick={() => { setSelectedEvent(isSelected ? null : ev); setAnalysisTab(2) }}
+                        className={`cursor-pointer transition-colors ${isSelected ? 'bg-teal-50' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/40 hover:bg-slate-100'}`}>
+                        <td className="px-4 py-2 text-right text-slate-400 tabular-nums">{i + 1}</td>
+                        <td className="px-4 py-2 font-medium text-slate-800">{ev.key}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_start || '—'}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_end || '—'}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.days ?? '—'}</td>
+                        <td className="px-4 py-2 text-right font-semibold text-slate-800 tabular-nums">{fmtCurrency(ev.sum)}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.count?.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-slate-400 max-w-xs truncate" title={ev.transaction_ids?.join(', ')}>{tidDisplay}</td>
+                      </tr>
+                    )
+                  }) : sortedEvents.map((row, i) => (
+                    <tr key={i} className={i % 2 === 0 ? 'bg-white hover:bg-slate-50 cursor-pointer' : 'bg-slate-50/40 hover:bg-slate-100 cursor-pointer'}
+                      onClick={() => { setSelectedEvent({ key: row[agg_key_col] }); setAnalysisTab(2) }}>
+                      {raw_columns.map(c => (
+                        <td key={c} className="px-3 py-2 text-slate-700 whitespace-nowrap">{row[c] ?? '—'}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ── Tab 2: Full Transaction Data ── */}
+        {analysisTab === 2 && (
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+              <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Full transaction data</p>
+              {selectedEvent ? (
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded px-2 py-1">
+                    Filtered: {visibleTx.length} txns for <strong>{selectedEvent.key}</strong>
+                    {selectedEvent.date_start && <span className="text-teal-500 ml-1">({selectedEvent.date_start} → {selectedEvent.date_end})</span>}
+                  </span>
+                  <button onClick={() => setSelectedEvent(null)}
+                    className="text-xs text-slate-400 hover:text-red-500">✕ Clear filter</button>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">{visibleTx.length.toLocaleString()} rows (select an event to filter)</p>
+              )}
+            </div>
+            <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide sticky top-0 z-10 whitespace-nowrap">
+                  <tr>
+                    {raw_columns.map(c => (
+                      <th key={c} onClick={() => c !== '_row' && toggleTxSort(c)}
+                        className={`px-3 py-2 text-left whitespace-nowrap select-none ${c !== '_row' ? 'cursor-pointer hover:text-slate-700' : ''}`}>
+                        {c === '_row' ? '#' : c}{c !== '_row' && <SortIcon col={c} s={txSort} />}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedTx.map((row, i) => (
+                    <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}>
+                      {raw_columns.map(c => (
+                        <td key={c} className="px-3 py-2 text-slate-700 whitespace-nowrap">{row[c] ?? '—'}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ── Tab 0: Statistics ── */}
+        {analysisTab === 0 && <div className="space-y-5">
 
         {/* Row 1: General statistics cards */}
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -881,6 +1080,8 @@ export default function ThresholdSetting() {
           </div>
         )}
 
+        </div>}{/* end tab 0 */}
+
         <div className="flex justify-between">
           <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
           <button onClick={() => setStep(4)}
@@ -892,7 +1093,64 @@ export default function ThresholdSetting() {
     )
   }
 
-  const renderStep4 = () => (
+  const renderStep4 = () => {
+    // ── Alerts for selected threshold ────────────────────────────────────────
+    const arEvents = analysisResult?.events || []
+    const arRawTx  = analysisResult?.raw_transactions || []
+    const arCols   = analysisResult?.raw_columns || []
+    const arAggKey = analysisResult?.agg_key_col || null
+    const arTidCol = analysisResult?.tid_col || null
+    const isAgg    = analysisResult?.analysis_type === 'aggregate' && arAggKey
+    const paramCol = analysisContext?.parameter_column || null
+
+    // Events that fire at the selected threshold
+    const simAlerts = (() => {
+      if (selectedSimThreshold == null) return []
+      if (isAgg) {
+        return arEvents.filter(ev => ev.sum >= selectedSimThreshold)
+      }
+      if (paramCol) {
+        return arRawTx.filter(row => parseFloat(row[paramCol]) >= selectedSimThreshold)
+      }
+      return []
+    })()
+
+    // Full transactions — filtered by clicked alert in tab 1
+    const simVisibleTx = (() => {
+      if (!selectedSimEvent) return arRawTx
+      if (selectedSimEvent.transaction_ids?.length && arTidCol) {
+        const idSet = new Set(selectedSimEvent.transaction_ids)
+        return arRawTx.filter(r => idSet.has(r[arTidCol]))
+      }
+      if (arAggKey) return arRawTx.filter(r => r[arAggKey] === selectedSimEvent.key)
+      return arRawTx
+    })()
+
+    // Sort helpers (reuse logic from analysis tabs)
+    const applySort = (arr, sortState) => {
+      if (!sortState.col) return arr
+      return [...arr].sort((a, b) => {
+        let av = a[sortState.col], bv = b[sortState.col]
+        if (av == null) av = ''; if (bv == null) bv = ''
+        const an = parseFloat(av), bn = parseFloat(bv)
+        const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv))
+        return sortState.dir === 'asc' ? cmp : -cmp
+      })
+    }
+    const toggleSA = col => setSimAlertsSort(p => p.col === col ? { col, dir: p.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
+    const toggleST = col => setSimTxSort(p => p.col === col ? { col, dir: p.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
+    const SI = ({ col, s }) => s.col !== col
+      ? <span className="opacity-30 ml-1 text-[10px]">⇅</span>
+      : <span className="text-teal-600 ml-1 text-[10px]">{s.dir === 'asc' ? '▲' : '▼'}</span>
+
+    const sortedSimAlerts = applySort(simAlerts, simAlertsSort)
+    const sortedSimTx     = applySort(simVisibleTx, simTxSort)
+
+    const alertLabel = selectedSimThreshold != null
+      ? `Alerts ≥ ${fmtCurrency(selectedSimThreshold)} (${simAlerts.length.toLocaleString()})`
+      : 'Alerts (select a threshold)'
+
+    return (
     <div className="space-y-6">
       <div>
         <div className="flex items-center justify-between mb-3">
@@ -919,96 +1177,241 @@ export default function ThresholdSetting() {
 
       {simResult && (
         <>
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-            <div className="px-5 py-3 border-b border-slate-100 bg-slate-50">
-              <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Threshold comparison</p>
-            </div>
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
-                <tr>
-                  <th className="px-5 py-2 text-left">Threshold</th>
-                  <th className="px-5 py-2 text-right whitespace-nowrap">Pctile.</th>
-                  <th className="px-5 py-2 text-right">Alerts</th>
-                  <th className="px-5 py-2 text-right whitespace-nowrap">% of txns</th>
-                  <th className="px-5 py-2 text-right whitespace-nowrap">% of total $</th>
-                  <th className="px-5 py-2 text-right whitespace-nowrap">Est. monthly</th>
-                </tr>
-              </thead>
-              <tbody>
-                {simResult.results.map((r, i) => {
-                  // Percentile = % of txns BELOW threshold = 100 - % alerted
-                  const pctile = r.events_pct != null ? 100 - r.events_pct : null
-                  return (
-                  <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
-                    <td className="px-5 py-2 font-mono font-semibold text-slate-700">{fmtCurrency(r.threshold)}</td>
-                    <td className="px-5 py-2 text-right text-slate-400 tabular-nums">{pctile != null ? `P${pctile.toFixed(0)}` : '—'}</td>
-                    <td className="px-5 py-2 text-right">{r.alert_count?.toLocaleString()}</td>
-                    <td className="px-5 py-2 text-right text-slate-500">{r.events_pct != null ? `${r.events_pct.toFixed(1)}%` : '—'}</td>
-                    <td className="px-5 py-2 text-right">{r.volume_pct != null ? `${r.volume_pct.toFixed(1)}%` : '—'}</td>
-                    <td className="px-5 py-2 text-right">{r.monthly_alerts?.toLocaleString() ?? '—'}</td>
-                  </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+          {/* ── Sub-tab bar ── */}
+          <div className="flex items-center gap-0 border-b border-slate-200">
+            {[
+              ['Overview', 0],
+              [alertLabel, 1],
+              ['Full transactions', 2],
+            ].map(([label, idx]) => (
+              <button key={idx} onClick={() => setSimTab(idx)}
+                className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px
+                  ${simTab === idx
+                    ? 'border-teal-600 text-teal-700'
+                    : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+                {label}
+              </button>
+            ))}
           </div>
 
-          {simResult.results.length > 1 && (
-            <div className="flex gap-4">
-              {/* Left: Alert counts */}
-              <div className="flex-1 bg-white border border-slate-200 rounded-xl p-5">
-                <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Alert counts by threshold</p>
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={simResult.results} barCategoryGap="35%">
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                    <XAxis dataKey="threshold" tick={{ fontSize: 11 }} tickFormatter={v => fmtCurrency(v)} />
-                    <YAxis tick={{ fontSize: 11 }} width={40} />
-                    <Tooltip
-                      formatter={(v, name) => [v?.toLocaleString(), name]}
-                      labelFormatter={v => `Threshold: ${fmtCurrency(v)}`}
-                    />
-                    <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="alert_count" fill="#0d9488" name="Total alerts" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="monthly_alerts" fill="#7c3aed" name="Est. monthly" radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+          {/* ── Tab 0: Overview (existing content) ── */}
+          {simTab === 0 && (
+            <div className="space-y-5">
+              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-5 py-3 border-b border-slate-100 bg-slate-50">
+                  <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Threshold comparison</p>
+                </div>
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
+                    <tr>
+                      <th className="px-5 py-2 text-left">Threshold</th>
+                      <th className="px-5 py-2 text-right whitespace-nowrap">Pctile.</th>
+                      <th className="px-5 py-2 text-right">Alerts</th>
+                      <th className="px-5 py-2 text-right whitespace-nowrap">% of txns</th>
+                      <th className="px-5 py-2 text-right whitespace-nowrap">% of total $</th>
+                      <th className="px-5 py-2 text-right whitespace-nowrap">Est. monthly</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {simResult.results.map((r, i) => {
+                      const pctile = r.events_pct != null ? 100 - r.events_pct : null
+                      const isSelected = selectedSimThreshold === r.threshold
+                      return (
+                        <tr key={i}
+                          onClick={() => { setSelectedSimThreshold(r.threshold); setSelectedSimEvent(null); setSimTab(1) }}
+                          className={`cursor-pointer transition-colors ${isSelected ? 'bg-teal-50' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
+                          <td className="px-5 py-2 font-mono font-semibold text-slate-700">{fmtCurrency(r.threshold)}</td>
+                          <td className="px-5 py-2 text-right text-slate-400 tabular-nums">{pctile != null ? `P${pctile.toFixed(0)}` : '—'}</td>
+                          <td className="px-5 py-2 text-right">{r.alert_count?.toLocaleString()}</td>
+                          <td className="px-5 py-2 text-right text-slate-500">{r.events_pct != null ? `${r.events_pct.toFixed(1)}%` : '—'}</td>
+                          <td className="px-5 py-2 text-right">{r.volume_pct != null ? `${r.volume_pct.toFixed(1)}%` : '—'}</td>
+                          <td className="px-5 py-2 text-right">{r.monthly_alerts?.toLocaleString() ?? '—'}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
 
-              {/* Right: Coverage % */}
-              <div className="flex-1 bg-white border border-slate-200 rounded-xl p-5">
-                <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Coverage by threshold</p>
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={simResult.results} barCategoryGap="35%">
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                    <XAxis dataKey="threshold" tick={{ fontSize: 11 }} tickFormatter={v => fmtCurrency(v)} />
-                    <YAxis tick={{ fontSize: 11 }} tickFormatter={v => `${v}%`} domain={[0, 100]} width={40} />
-                    <Tooltip
-                      formatter={(v, name) => [`${Number(v).toFixed(1)}%`, name]}
-                      labelFormatter={v => `Threshold: ${fmtCurrency(v)}`}
-                    />
-                    <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
-                    <Bar dataKey="events_pct" fill="#f59e0b" name="% of txns" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="volume_pct" fill="#0ea5e9" name="% of total $" radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+              {simResult.results.length > 1 && (
+                <div className="flex gap-4">
+                  <div className="flex-1 bg-white border border-slate-200 rounded-xl p-5">
+                    <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Alert counts by threshold</p>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={simResult.results} barCategoryGap="35%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <XAxis dataKey="threshold" tick={{ fontSize: 11 }} tickFormatter={v => fmtCurrency(v)} />
+                        <YAxis tick={{ fontSize: 11 }} width={40} />
+                        <Tooltip formatter={(v, name) => [v?.toLocaleString(), name]} labelFormatter={v => `Threshold: ${fmtCurrency(v)}`} />
+                        <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                        <Bar dataKey="alert_count" fill="#0d9488" name="Total alerts" radius={[3, 3, 0, 0]} />
+                        <Bar dataKey="monthly_alerts" fill="#7c3aed" name="Est. monthly" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="flex-1 bg-white border border-slate-200 rounded-xl p-5">
+                    <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Coverage by threshold</p>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={simResult.results} barCategoryGap="35%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <XAxis dataKey="threshold" tick={{ fontSize: 11 }} tickFormatter={v => fmtCurrency(v)} />
+                        <YAxis tick={{ fontSize: 11 }} tickFormatter={v => `${v}%`} domain={[0, 100]} width={40} />
+                        <Tooltip formatter={(v, name) => [`${Number(v).toFixed(1)}%`, name]} labelFormatter={v => `Threshold: ${fmtCurrency(v)}`} />
+                        <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                        <Bar dataKey="events_pct" fill="#f59e0b" name="% of txns" radius={[3, 3, 0, 0]} />
+                        <Bar dataKey="volume_pct" fill="#0ea5e9" name="% of total $" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
+              {simResult.recommendation && (() => {
+                const rec = simResult.recommendation
+                return (
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-4">
+                    <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide mb-1">Recommendation</p>
+                    <p className="text-sm text-amber-900">
+                      Set threshold at <span className="font-semibold">{fmtCurrency(rec.threshold)}</span>, capturing{' '}
+                      <span className="font-semibold">{rec.volume_pct?.toFixed(1)}%</span> of total dollar volume and{' '}
+                      <span className="font-semibold">{rec.events_pct?.toFixed(1)}%</span> of transactions,{' '}
+                      generating an estimated <span className="font-semibold">{rec.monthly_alerts?.toLocaleString()}</span> monthly alerts.
+                    </p>
+                  </div>
+                )
+              })()}
             </div>
           )}
 
-          {simResult.recommendation && (() => {
-            const rec = simResult.recommendation
-            return (
-              <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-4">
-                <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide mb-1">Recommendation</p>
-                <p className="text-sm text-amber-900">
-                  Set threshold at <span className="font-semibold">{fmtCurrency(rec.threshold)}</span>, capturing{' '}
-                  <span className="font-semibold">{rec.volume_pct?.toFixed(1)}%</span> of total dollar volume and{' '}
-                  <span className="font-semibold">{rec.events_pct?.toFixed(1)}%</span> of transactions,{' '}
-                  generating an estimated <span className="font-semibold">{rec.monthly_alerts?.toLocaleString()}</span> monthly alerts.
+          {/* ── Tab 1: Alerts at selected threshold ── */}
+          {simTab === 1 && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">
+                  {selectedSimThreshold != null
+                    ? `${simAlerts.length.toLocaleString()} alerts at threshold ${fmtCurrency(selectedSimThreshold)}`
+                    : 'Select a threshold from the Overview tab'}
                 </p>
+                <p className="text-xs text-slate-400">Click a row to filter full transactions</p>
               </div>
-            )
-          })()}
+              {selectedSimThreshold == null ? (
+                <div className="p-8 text-center text-sm text-slate-400">
+                  Go to the Overview tab and click a threshold row to see its alerts here.
+                </div>
+              ) : (
+                <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide sticky top-0 z-10 whitespace-nowrap">
+                      {isAgg ? (
+                        <tr>
+                          <th className="px-4 py-2 text-right w-10">#</th>
+                          {[
+                            ['key', arAggKey, 'text-left'],
+                            ['date_start', 'Start date', 'text-right'],
+                            ['date_end', 'End date', 'text-right'],
+                            ['days', 'Days', 'text-right'],
+                            ['sum', 'Sum', 'text-right'],
+                            ['count', 'Count', 'text-right'],
+                          ].map(([col, label, align]) => (
+                            <th key={col} onClick={() => toggleSA(col)}
+                              className={`px-4 py-2 ${align} cursor-pointer select-none hover:text-slate-700 whitespace-nowrap`}>
+                              {label}<SI col={col} s={simAlertsSort} />
+                            </th>
+                          ))}
+                          <th className="px-4 py-2 text-left">Transaction IDs</th>
+                        </tr>
+                      ) : (
+                        <tr>
+                          <th className="px-3 py-2 text-right w-10">#</th>
+                          {arCols.filter(c => c !== '_row').map(c => (
+                            <th key={c} onClick={() => toggleSA(c)}
+                              className="px-3 py-2 text-left cursor-pointer select-none hover:text-slate-700 whitespace-nowrap">
+                              {c}<SI col={c} s={simAlertsSort} />
+                            </th>
+                          ))}
+                        </tr>
+                      )}
+                    </thead>
+                    <tbody>
+                      {isAgg ? sortedSimAlerts.map((ev, i) => {
+                        const isSelected = selectedSimEvent?.key === ev.key && selectedSimEvent?.date_start === ev.date_start
+                        const tidDisplay = ev.transaction_ids?.slice(0, 3).join(', ') + (ev.transaction_ids?.length > 3 ? ` +${ev.transaction_ids.length - 3} more` : '')
+                        return (
+                          <tr key={i}
+                            onClick={() => { setSelectedSimEvent(isSelected ? null : ev); setSimTab(2) }}
+                            className={`cursor-pointer transition-colors ${isSelected ? 'bg-teal-50' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/40 hover:bg-slate-100'}`}>
+                            <td className="px-4 py-2 text-right text-slate-400 tabular-nums">{i + 1}</td>
+                            <td className="px-4 py-2 font-medium text-slate-800">{ev.key}</td>
+                            <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_start || '—'}</td>
+                            <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_end || '—'}</td>
+                            <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.days ?? '—'}</td>
+                            <td className="px-4 py-2 text-right font-semibold text-slate-800 tabular-nums">{fmtCurrency(ev.sum)}</td>
+                            <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.count?.toLocaleString()}</td>
+                            <td className="px-4 py-2 text-slate-400 max-w-xs truncate" title={ev.transaction_ids?.join(', ')}>{tidDisplay}</td>
+                          </tr>
+                        )
+                      }) : sortedSimAlerts.map((row, i) => {
+                        const isSelected = selectedSimEvent?._row === row._row
+                        return (
+                          <tr key={i}
+                            onClick={() => { setSelectedSimEvent(isSelected ? null : { ...row, key: row[arAggKey] }); setSimTab(2) }}
+                            className={`cursor-pointer transition-colors ${isSelected ? 'bg-teal-50' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/40 hover:bg-slate-100'}`}>
+                            <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{i + 1}</td>
+                            {arCols.filter(c => c !== '_row').map(c => (
+                              <td key={c} className="px-3 py-2 text-slate-700 whitespace-nowrap">{row[c] ?? '—'}</td>
+                            ))}
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Tab 2: Full transactions ── */}
+          {simTab === 2 && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Full transaction data</p>
+                {selectedSimEvent ? (
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded px-2 py-1">
+                      Filtered: {simVisibleTx.length} txns for <strong>{selectedSimEvent.key}</strong>
+                      {selectedSimEvent.date_start && <span className="text-teal-500 ml-1">({selectedSimEvent.date_start} → {selectedSimEvent.date_end})</span>}
+                    </span>
+                    <button onClick={() => setSelectedSimEvent(null)} className="text-xs text-slate-400 hover:text-red-500">✕ Clear filter</button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-400">{arRawTx.length.toLocaleString()} rows (select an alert to filter)</p>
+                )}
+              </div>
+              <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide sticky top-0 z-10 whitespace-nowrap">
+                    <tr>
+                      {arCols.map(c => (
+                        <th key={c} onClick={() => c !== '_row' && toggleST(c)}
+                          className={`px-3 py-2 text-left whitespace-nowrap select-none ${c !== '_row' ? 'cursor-pointer hover:text-slate-700' : ''}`}>
+                          {c === '_row' ? '#' : c}{c !== '_row' && <SI col={c} s={simTxSort} />}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedSimTx.map((row, i) => (
+                      <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}>
+                        {arCols.map(c => (
+                          <td key={c} className="px-3 py-2 text-slate-700 whitespace-nowrap">{row[c] ?? '—'}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -1020,7 +1423,8 @@ export default function ThresholdSetting() {
         </button>
       </div>
     </div>
-  )
+    )
+  }
 
   const renderStep5 = () => (
     <div className="space-y-5">

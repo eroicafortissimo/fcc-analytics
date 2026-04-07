@@ -6,10 +6,14 @@ function filterParams(filters) {
   const p = new URLSearchParams()
   ;(filters.watchlists || []).forEach(w => p.append('watchlists', w))
   ;(filters.entity_types || []).forEach(e => p.append('entity_types', e))
+  ;(filters.cultures || []).forEach(c => p.append('cultures', c))
+  ;(filters.programs || []).forEach(p2 => p.append('programs', p2))
   if (filters.search) p.set('search', filters.search)
   if (filters.recently_modified_only) p.set('recently_modified_only', 'true')
   if (filters.min_tokens != null) p.set('min_tokens', filters.min_tokens)
   if (filters.max_tokens != null) p.set('max_tokens', filters.max_tokens)
+  if (filters.min_length != null) p.set('min_length', filters.min_length)
+  if (filters.max_length != null) p.set('max_length', filters.max_length)
   return p
 }
 

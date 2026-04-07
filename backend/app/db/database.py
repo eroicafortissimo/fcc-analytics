@@ -129,6 +129,47 @@ async def init_db():
                     confidence TEXT DEFAULT 'medium',
                     analyzed_at TEXT DEFAULT (datetime('now'))
                 );
+
+                CREATE TABLE IF NOT EXISTS threshold_datasets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    row_count INTEGER,
+                    column_list TEXT,
+                    date_range_start TEXT,
+                    date_range_end TEXT,
+                    uploaded_at TEXT DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS threshold_scenarios (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_id INTEGER REFERENCES threshold_datasets(id),
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    filter_rules TEXT,
+                    analysis_type TEXT DEFAULT 'single',
+                    aggregation_key TEXT,
+                    aggregation_amount TEXT,
+                    aggregation_date TEXT,
+                    aggregation_period TEXT DEFAULT 'none',
+                    aggregation_days INTEGER DEFAULT 30,
+                    aggregation_function TEXT DEFAULT 'SUM',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    created_by_ai INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS threshold_analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scenario_id INTEGER,
+                    parameter_columns TEXT,
+                    statistics TEXT,
+                    threshold_values TEXT,
+                    threshold_results TEXT,
+                    recommended_threshold REAL,
+                    recommendation_reason TEXT,
+                    report_text TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                );
             """)
         except Exception as exc:
             logger.warning("init_db executescript skipped (DB may be busy): %s", exc)
@@ -142,6 +183,8 @@ async def init_db():
         # Migrations — add columns/indexes that may not exist in older DBs.
         # Each is individually wrapped so one failure doesn't block the rest.
         for migration in [
+            "ALTER TABLE threshold_analyses ADD COLUMN series_data TEXT",
+            "ALTER TABLE threshold_datasets ADD COLUMN file_data BLOB",
             "ALTER TABLE watchlist_entries ADD COLUMN parent_uid TEXT",
             "ALTER TABLE watchlist_entries ADD COLUMN region TEXT",
             "ALTER TABLE watchlist_entries ADD COLUMN name_culture TEXT",

@@ -686,6 +686,20 @@ def _build_where(filters: ListFilters) -> tuple[str, list[Any]]:
         conditions.append(f"entity_type IN ({placeholders})")
         params.extend(filters.entity_types)
 
+    if filters.cultures:
+        # Also match the DB typo variant "Slavic/Eastern Eastern European"
+        expanded = list(filters.cultures)
+        if "Slavic/Eastern European" in expanded and "Slavic/Eastern Eastern European" not in expanded:
+            expanded.append("Slavic/Eastern Eastern European")
+        placeholders = ", ".join("?" for _ in expanded)
+        conditions.append(f"name_culture IN ({placeholders})")
+        params.extend(expanded)
+
+    if filters.programs:
+        prog_conditions = [f"sanctions_program LIKE ?" for _ in filters.programs]
+        conditions.append(f"({' OR '.join(prog_conditions)})")
+        params.extend(f"%{p}%" for p in filters.programs)
+
     if filters.search:
         conditions.append("(cleaned_name LIKE ? OR original_name LIKE ?)")
         like = f"%{filters.search}%"
@@ -701,6 +715,14 @@ def _build_where(filters: ListFilters) -> tuple[str, list[Any]]:
     if filters.max_tokens is not None:
         conditions.append("num_tokens <= ?")
         params.append(filters.max_tokens)
+
+    if filters.min_length is not None:
+        conditions.append("name_length >= ?")
+        params.append(filters.min_length)
+
+    if filters.max_length is not None:
+        conditions.append("name_length <= ?")
+        params.append(filters.max_length)
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     return where, params

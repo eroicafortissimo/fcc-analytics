@@ -1980,13 +1980,19 @@ async def _sample_names(
     custom_dist: dict | None = None,
     primary_aka_filter: str | None = None,
     watchlists: list[str] | None = None,
+    exclude_uids: set[str] | None = None,
 ) -> list[dict]:
     """
     Stratified sample of watchlist entries for a given type's constraints.
-    Returns up to `count * 2` rows to allow for skips.
+    Returns up to `count * 10` rows to allow for skips.
     """
     conditions = []
     params: list = []
+
+    if exclude_uids:
+        ph = ', '.join('?' for _ in exclude_uids)
+        conditions.append(f"uid NOT IN ({ph})")
+        params.extend(exclude_uids)
 
     if primary_aka_filter is not None:
         conditions.append("primary_aka = ?")
@@ -2038,28 +2044,33 @@ async def _sample_names(
                     all_rows.extend([dict(r) for r in await cur.fetchall()])
             return all_rows
 
-    # ── Balanced distribution: equal sample from each available culture ────────
+    # ── Balanced distribution: single query + Python-side culture balancing ──────
+    import random as _random
+    from collections import defaultdict
+
     if distribution == 'balanced':
-        culture_cond = "name_culture IS NOT NULL AND name_culture != ''"
-        culture_where = (where + " AND " + culture_cond) if where else ("WHERE " + culture_cond)
+        sample_n = min(count * 10, 5000)
         async with db.execute(
-            f"SELECT DISTINCT name_culture FROM watchlist_entries {culture_where}",
-            params,
+            f"{_SELECT} {where} ORDER BY RANDOM() LIMIT ?",
+            params + [sample_n],
         ) as cur:
-            cultures = [r[0] for r in await cur.fetchall()]
-        if cultures:
-            per_culture = max(2, (count * 10) // len(cultures))
-            all_rows = []
-            for culture in cultures:
-                c_conditions = conditions + ["name_culture = ?"]
-                c_params = params + [culture]
-                c_where = "WHERE " + " AND ".join(c_conditions)
-                async with db.execute(
-                    f"{_SELECT} {c_where} ORDER BY RANDOM() LIMIT ?",
-                    c_params + [per_culture],
-                ) as cur:
-                    all_rows.extend([dict(r) for r in await cur.fetchall()])
-            return all_rows
+            all_rows = [dict(r) for r in await cur.fetchall()]
+        if all_rows:
+            by_culture: dict = defaultdict(list)
+            no_culture = []
+            for row in all_rows:
+                c = row.get('name_culture') or ''
+                if c:
+                    by_culture[c].append(row)
+                else:
+                    no_culture.append(row)
+            per_culture = max(2, (count * 10) // max(len(by_culture), 1))
+            balanced: list[dict] = []
+            for rows in by_culture.values():
+                balanced.extend(rows[:per_culture])
+            balanced.extend(no_culture[:per_culture])
+            _random.shuffle(balanced)
+            return balanced
 
     # ── Weighted / fallback: random sample from full candidate pool ───────────
     async with db.execute(
@@ -2104,6 +2115,7 @@ async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connecti
     summary = {
         'generated': 0,
         'skipped': 0,
+        'count_per_type': request.count_per_type,
         'by_type': {},
         'skip_reasons': {},
     }
@@ -2137,8 +2149,8 @@ async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connecti
 
         entity_overrides = (request.outcome_overrides or {}).get(type_id, {})
 
-        # Iterate each applicable entity type separately so count_per_type
-        # applies per entity type, not across all entity types combined.
+        # Iterate each applicable entity type separately.
+        # count_per_type applies PER entity type — so 10 with 4 applicable types = 40 total.
         _all_ets = ['individual', 'entity', 'vessel', 'aircraft', 'country', 'unknown']
         ets_to_sample = type_def.applicable_entity_types if type_def.applicable_entity_types else _all_ets
         applicable_set = set(ets_to_sample)
@@ -2152,81 +2164,152 @@ async def generate_test_cases(request: GenerationRequest, db: aiosqlite.Connecti
             if et not in applicable_set:
                 type_et_results[et] = {'generated': 0, 'skipped': 0, 'reason': 'not_applicable'}
 
+        # Pre-sample ALL applicable entity types in ONE query (avoids N separate
+        # ORDER BY RANDOM() table scans — biggest performance win).
+        prefetch_count = request.count_per_type * max(len(ets_to_sample), 1)
+        prefetch_all = await _sample_names(
+            applicable_entity_types=list(ets_to_sample),
+            min_tokens=type_def.applicable_min_tokens,
+            min_name_length=type_def.applicable_min_name_length,
+            count=prefetch_count,
+            db=db,
+            distribution=request.culture_distribution,
+            custom_dist=request.custom_distribution,
+            primary_aka_filter=PRIMARY_AKA_FILTER_MAP.get(type_id),
+            watchlists=request.watchlists or None,
+        )
+        from collections import defaultdict as _defaultdict
+        prefetch_by_et: dict = _defaultdict(list)
+        for _r in prefetch_all:
+            prefetch_by_et[_r['entity_type']].append(_r)
+
         for et in ets_to_sample:
-            candidates = await _sample_names(
-                applicable_entity_types=[et],
-                min_tokens=type_def.applicable_min_tokens,
-                min_name_length=type_def.applicable_min_name_length,
-                count=request.count_per_type,
-                db=db,
-                distribution=request.culture_distribution,
-                custom_dist=request.custom_distribution,
-                primary_aka_filter=PRIMARY_AKA_FILTER_MAP.get(type_id),
-                watchlists=request.watchlists or None,
-            )
-
-            if not candidates:
-                type_et_results[et] = {'generated': 0, 'skipped': 0, 'reason': 'no_watchlist_data'}
-                continue
-
             final_outcome = entity_overrides.get(et, expected_outcome) if entity_overrides else expected_outcome
             expected_result, rationale_prefix = outcome_to_result(final_outcome)
 
+            et_target = request.count_per_type
+
             et_count = 0
             et_skips = 0
-            for record in candidates:
-                if et_count >= request.count_per_type:
+            et_accepted_seq = 0
+            et_rejected_seq = 0
+            seen_uids: set[str] = set()
+            et_log: list[dict] = []
+            max_rounds = 10
+
+            for _round in range(max_rounds):
+                if et_count >= et_target:
                     break
 
-                name = record['cleaned_name']
-                try:
-                    test_name, rationale_suffix = var_fn(name, record, rng)
-                except Exception as exc:
-                    test_name = None
-                    rationale_suffix = f"error: {exc}"
+                if _round == 0:
+                    # Use pre-fetched candidates (no extra DB query needed)
+                    candidates = prefetch_by_et.get(et, [])
+                else:
+                    # Retry: weighted sampling excluding already-seen UIDs.
+                    # Request full et_target (not just the gap) so _sample_names
+                    # fetches count*10 candidates — needed for high-rejection types.
+                    candidates = await _sample_names(
+                        applicable_entity_types=[et],
+                        min_tokens=type_def.applicable_min_tokens,
+                        min_name_length=type_def.applicable_min_name_length,
+                        count=et_target,
+                        db=db,
+                        distribution='weighted',
+                        custom_dist=None,
+                        primary_aka_filter=PRIMARY_AKA_FILTER_MAP.get(type_id),
+                        watchlists=request.watchlists or None,
+                        exclude_uids=seen_uids if seen_uids else None,
+                    )
 
-                same_name = test_name is not None and test_name.strip() == name.strip()
-                if test_name is None or (same_name and type_id not in PASSTHROUGH_TYPES):
-                    et_skips += 1
-                    type_skips += 1
-                    reason = rationale_suffix
-                    summary['skip_reasons'][reason] = summary['skip_reasons'].get(reason, 0) + 1
-                    continue
+                if not candidates:
+                    if _round == 0:
+                        type_et_results[et] = {'generated': 0, 'skipped': 0, 'reason': 'no_watchlist_data', 'log': []}
+                    break
 
-                test_name = test_name.strip()
-                tc_id = f"{type_id}_{str(uuid.uuid4())[:8]}"
-                full_rationale = f"{rationale_prefix} — {rationale_suffix}"
+                new_this_round = 0
+                for record in candidates:
+                    if et_count >= et_target:
+                        break
+                    uid = record['uid']
+                    if uid in seen_uids:
+                        continue
+                    seen_uids.add(uid)
+                    new_this_round += 1
 
-                rows_to_insert.append((
-                    tc_id,
-                    f"{meta.get('type_name', type_id)} ({type_id})",
-                    record['watchlist'],
-                    record.get('sub_watchlist_1'),
-                    record['cleaned_name'],
-                    record['original_name'],
-                    record.get('name_culture'),
-                    test_name,
-                    record['primary_aka'],
-                    record['entity_type'],
-                    len(test_name.split()),
-                    len(test_name),
-                    expected_result,
-                    full_rationale,
-                ))
-                et_count += 1
-                type_count += 1
+                    name = record['cleaned_name']
+                    try:
+                        test_name, rationale_suffix = var_fn(name, record, rng)
+                    except Exception as exc:
+                        test_name = None
+                        rationale_suffix = f"error: {exc}"
 
-            if et_count == 0:
+                    same_name = test_name is not None and test_name.strip() == name.strip()
+                    if test_name is None or (same_name and type_id not in PASSTHROUGH_TYPES):
+                        et_skips += 1
+                        type_skips += 1
+                        et_rejected_seq += 1
+                        reason = rationale_suffix
+                        summary['skip_reasons'][reason] = summary['skip_reasons'].get(reason, 0) + 1
+                        et_log.append({
+                            'source_name': name,
+                            'accepted': False,
+                            'reject_reason': reason,
+                            'variant': None,
+                            'accepted_seq': et_accepted_seq,
+                            'rejected_seq': et_rejected_seq,
+                        })
+                        continue
+
+                    test_name = test_name.strip()
+                    et_accepted_seq += 1
+                    tc_id = f"{type_id}_{str(uuid.uuid4())[:8]}"
+                    full_rationale = f"{rationale_prefix} — {rationale_suffix}"
+
+                    rows_to_insert.append((
+                        tc_id,
+                        f"{meta.get('type_name', type_id)} ({type_id})",
+                        record['watchlist'],
+                        record.get('sub_watchlist_1'),
+                        record['cleaned_name'],
+                        record['original_name'],
+                        record.get('name_culture'),
+                        test_name,
+                        record['primary_aka'],
+                        record['entity_type'],
+                        len(test_name.split()),
+                        len(test_name),
+                        expected_result,
+                        full_rationale,
+                    ))
+                    et_log.append({
+                        'source_name': name,
+                        'accepted': True,
+                        'reject_reason': None,
+                        'variant': test_name,
+                        'accepted_seq': et_accepted_seq,
+                        'rejected_seq': et_rejected_seq,
+                    })
+                    et_count += 1
+                    type_count += 1
+
+                if new_this_round == 0:
+                    break  # DB exhausted — no unseen rows remain for this entity type
+
+            if et_count == 0 and et not in type_et_results:
                 type_et_results[et] = {
                     'generated': 0,
+                    'target': et_target,
                     'skipped': et_skips,
                     'reason': 'all_names_skipped' if et_skips > 0 else 'no_watchlist_data',
+                    'log': et_log,
                 }
-            else:
-                type_et_results[et] = {'generated': et_count, 'skipped': et_skips}
+            elif et not in type_et_results:
+                type_et_results[et] = {'generated': et_count, 'target': et_target, 'skipped': et_skips, 'log': et_log}
 
         summary['by_type'][type_id] = {
+            'type_name': meta.get('type_name', type_id),
             'generated': type_count,
+            'target': request.count_per_type * len(ets_to_sample),
             'skipped': type_skips,
             'by_entity_type': type_et_results,
         }

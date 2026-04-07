@@ -13,6 +13,7 @@ dotenv.load_dotenv(Path(__file__).parent.parent / ".env")
 from app.routers import lists, testcases, results, transactiq
 from app.routers.listiq import sync as listiq_sync, changes as listiq_changes, records as listiq_records
 from app.routers import reconciliation
+from app.routers import threshold as threshold_router
 from app.db.database import init_db
 from app.services.listiq.db import init_listiq_db
 from app.services.listiq.scheduler import start_scheduler, stop_scheduler
@@ -91,6 +92,9 @@ app.include_router(transactiq.router, prefix="/api/transactiq", tags=["transacti
 app.include_router(listiq_sync.router, prefix="/api/listiq/sync", tags=["listiq-sync"])
 app.include_router(listiq_changes.router, prefix="/api/listiq/changes", tags=["listiq-changes"])
 app.include_router(listiq_records.router, prefix="/api/listiq/records", tags=["listiq-records"])
+
+# Threshold Setting routes
+app.include_router(threshold_router.router, prefix="/api/threshold", tags=["threshold"])
 
 
 @app.get("/api/health")

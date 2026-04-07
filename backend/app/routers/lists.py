@@ -35,10 +35,14 @@ async def trigger_download(
 async def get_entries(
     watchlists: list[str] = Query(default=[]),
     entity_types: list[str] = Query(default=[]),
+    cultures: list[str] = Query(default=[]),
+    programs: list[str] = Query(default=[]),
     search: Optional[str] = Query(default=None),
     recently_modified_only: bool = Query(default=False),
     min_tokens: Optional[int] = Query(default=None),
     max_tokens: Optional[int] = Query(default=None),
+    min_length: Optional[int] = Query(default=None),
+    max_length: Optional[int] = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=500),
     db: aiosqlite.Connection = Depends(get_db),
@@ -47,10 +51,14 @@ async def get_entries(
     filters = ListFilters(
         watchlists=watchlists,
         entity_types=entity_types,
+        cultures=cultures,
+        programs=programs,
         search=search,
         recently_modified_only=recently_modified_only,
         min_tokens=min_tokens,
         max_tokens=max_tokens,
+        min_length=min_length,
+        max_length=max_length,
         page=page,
         page_size=page_size,
     )
@@ -79,20 +87,28 @@ async def get_cultures(db: aiosqlite.Connection = Depends(get_db)):
 async def get_chart_data_endpoint(
     watchlists: list[str] = Query(default=[]),
     entity_types: list[str] = Query(default=[]),
+    cultures: list[str] = Query(default=[]),
+    programs: list[str] = Query(default=[]),
     search: Optional[str] = Query(default=None),
     recently_modified_only: bool = Query(default=False),
     min_tokens: Optional[int] = Query(default=None),
     max_tokens: Optional[int] = Query(default=None),
+    min_length: Optional[int] = Query(default=None),
+    max_length: Optional[int] = Query(default=None),
     db: aiosqlite.Connection = Depends(get_db),
 ):
     """Return chart data aggregations that respect the current active filters."""
     filters = ListFilters(
         watchlists=watchlists,
         entity_types=entity_types,
+        cultures=cultures,
+        programs=programs,
         search=search,
         recently_modified_only=recently_modified_only,
         min_tokens=min_tokens,
         max_tokens=max_tokens,
+        min_length=min_length,
+        max_length=max_length,
         page=1,
         page_size=1,
     )
@@ -124,17 +140,50 @@ Query: "{query}"
 Available filters (use only what applies):
 - watchlists: array, values from [OFAC_SDN, OFAC_NON_SDN, EU, HMT, BIS, JAPAN]
 - entity_types: array, values from [individual, entity, vessel, aircraft]
-- nationalities: array of nationality/region strings (e.g. "Russian", "Iranian", "Chinese", "African", "Middle Eastern / North African")
-- search: keyword string for name search (use for specific names or terms)
+- cultures: array of name_culture values. Use ONLY exact values from this list:
+  Chinese, Japanese, Korean, Arabic, Persian/Farsi, Turkish, Anglo/Germanic,
+  Slavic/Eastern European, Hispanic/Latino, Romance, Indian/South Asian, Pakistani/Bangladeshi,
+  Filipino, Indonesian/Malay, Vietnamese, South & Southeast Asian,
+  Central African, East African, Southern African, West African,
+  Central Asian, Berber, Hebrew/Israeli, Albanian, Nordic, Burmese, South American Indigenous
+  Map user terms: "Chinese"→[Chinese], "Russian"→[Slavic/Eastern European],
+  "Iranian"→[Persian/Farsi], "Arab"/"Arabic"→[Arabic], "Spanish"/"Latino"→[Hispanic/Latino],
+  "Indian"→[Indian/South Asian], "Pakistani"→[Pakistani/Bangladeshi],
+  "South Asian"→[Indian/South Asian, Pakistani/Bangladeshi],
+  "Southeast Asian"→[Filipino, Indonesian/Malay, Vietnamese, South & Southeast Asian],
+  "Middle Eastern"→[Arabic, Persian/Farsi, Turkish, Berber],
+  "European"→[Anglo/Germanic, Slavic/Eastern European, Romance, Nordic, Albanian],
+  "African"→[Central African, East African, Southern African, West African],
+  "Korean"→[Korean], "Japanese"→[Japanese], "Turkish"→[Turkish],
+  "French"/"Italian"/"Portuguese"→[Romance], "Hebrew"/"Israeli"→[Hebrew/Israeli].
+- programs: array of sanctions program keyword strings (each matched as a substring against the program field).
+  Use ONLY for queries about specific sanctions programs or thematic categories, NOT for nationality/name queries.
+  Map user terms: "North Korea"/"DPRK"→["DPRK"], "Iran program"/"IRGC"→["IRAN","IRGC"],
+  "counter-terrorism"/"terrorism"/"terrorist"→["SDGT","TERR","FTO"],
+  "drug trafficking"/"narcotics"/"drugs"→["SDNT","TCO"],
+  "Syria"/"Syrian program"→["SYRIA"], "Cuba"→["CUBA"], "Venezuela program"→["VENEZUELA"],
+  "Russia program"→["RUSSIA"], "Belarus"→["BELARUS"], "cyber"→["CYBER"],
+  "human rights"/"Magnitsky"→["GLOMAG","MAGNIT"], "Burma"/"Myanmar"→["BURMA","MMR"],
+  "Libya"→["LIBYA"], "Somalia"→["SOMALIA"], "Yemen"→["YEMEN"], "Iraq"→["IRAQ"],
+  "Sudan"→["SUDAN"], "Ukraine"→["UKRAINE"], "weapons"/"WMD"/"proliferation"→["NPWMD","IFSR","CAATSA"].
+- search: substring match on name only. Use for specific person/company names. Do NOT use wildcards or special characters. Do NOT use for program codes or themes.
 - recently_modified_only: boolean
-- min_tokens: integer — minimum number of space-separated tokens in the name (e.g. "two or more tokens" → 2, "at least three words" → 3)
-- max_tokens: integer — maximum number of tokens (e.g. "at most four tokens" → 4, "up to two words" → 2)
-  Use both min_tokens and max_tokens together for an exact count (e.g. "exactly two tokens" → min_tokens: 2, max_tokens: 2).
+- min_tokens: integer — minimum number of space-separated words in the name (e.g. "two or more words" → 2)
+- max_tokens: integer — maximum number of words (e.g. "at most four words" → 4)
+  Use both together for an exact word count.
+- min_length: integer — minimum number of characters in the name (e.g. "longer than 10 characters" → 11)
+- max_length: integer — maximum number of characters (e.g. "less than 10 characters" → 9, "under 10 letters" → 9)
+  Use both together for an exact length. IMPORTANT: use length for character counts, tokens for word counts only.
 
 Respond with ONLY a JSON object. Include "explanation" key (1-2 sentences describing the search).
-Example: {{"entity_types": ["vessel"], "nationalities": ["Iranian"], "explanation": "Searching for Iranian vessels."}}
-Example: {{"entity_types": ["individual"], "min_tokens": 2, "max_tokens": 2, "explanation": "Searching for individuals with exactly two-token names."}}
-Example: {{"entity_types": ["individual"], "min_tokens": 2, "explanation": "Searching for individuals with two or more tokens."}}
+Example: {{"entity_types": ["vessel"], "cultures": ["Arabic"], "explanation": "Searching for Arabic-named vessels."}}
+Example: {{"entity_types": ["individual"], "cultures": ["Chinese"], "explanation": "Searching for Chinese individuals."}}
+Example: {{"cultures": ["Central African","East African","Southern African","West African"], "explanation": "Searching for African entries."}}
+Example: {{"programs": ["SDGT","TERR","FTO"], "explanation": "Searching for counter-terrorism designations."}}
+Example: {{"entity_types": ["entity"], "programs": ["DPRK"], "explanation": "Searching for North Korean entities."}}
+Example: {{"programs": ["SDNT","TCO"], "explanation": "Searching for drug trafficking entries."}}
+Example: {{"max_length": 9, "explanation": "Searching for names with fewer than 10 characters."}}
+Example: {{"entity_types": ["individual"], "min_tokens": 2, "explanation": "Searching for individuals with two or more name words."}}
 If nothing maps, return {{"explanation": "Could not parse query into known filters."}}"""
 
     try:

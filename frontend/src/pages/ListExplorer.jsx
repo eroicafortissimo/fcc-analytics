@@ -32,10 +32,14 @@ const capFirst = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s
 const EMPTY_FILTERS = {
   watchlists: [],
   entity_types: [],
+  cultures: [],
+  programs: [],
   search: '',
   recently_modified_only: false,
   min_tokens: null,
   max_tokens: null,
+  min_length: null,
+  max_length: null,
 }
 
 // ── Profile URL builder ───────────────────────────────────────────────────────
@@ -360,9 +364,11 @@ export default function ListExplorer() {
   }
 
   const activeFilterCount =
-    filters.watchlists.length + filters.entity_types.length +
+    filters.watchlists.length + filters.entity_types.length + filters.cultures.length +
+    filters.programs.length +
     (filters.search ? 1 : 0) + (filters.recently_modified_only ? 1 : 0) +
-    (filters.min_tokens != null || filters.max_tokens != null ? 1 : 0)
+    (filters.min_tokens != null || filters.max_tokens != null ? 1 : 0) +
+    (filters.min_length != null || filters.max_length != null ? 1 : 0)
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
@@ -428,10 +434,14 @@ export default function ListExplorer() {
         ...EMPTY_FILTERS,
         watchlists: f.watchlists || [],
         entity_types: f.entity_types || [],
+        cultures: f.cultures || f.nationalities || [],
+        programs: f.programs || [],
         search: f.search || '',
         recently_modified_only: f.recently_modified_only || false,
         min_tokens: f.min_tokens != null ? parseInt(f.min_tokens, 10) : null,
         max_tokens: f.max_tokens != null ? parseInt(f.max_tokens, 10) : null,
+        min_length: f.min_length != null ? parseInt(f.min_length, 10) : null,
+        max_length: f.max_length != null ? parseInt(f.max_length, 10) : null,
       }
       applyFilters(newFilters)
       if (f.search) setSearchDraft(f.search)
@@ -599,6 +609,14 @@ export default function ListExplorer() {
               <Badge key={e} label={capFirst(e)} color="#10b981"
                 onRemove={() => updateFilter('entity_types', filters.entity_types.filter(v => v !== e))} />
             ))}
+            {filters.cultures.map(c => (
+              <Badge key={c} label={c} color="#10b981"
+                onRemove={() => updateFilter('cultures', filters.cultures.filter(v => v !== c))} />
+            ))}
+            {filters.programs.map(p => (
+              <Badge key={p} label={p} color="#f59e0b"
+                onRemove={() => updateFilter('programs', filters.programs.filter(v => v !== p))} />
+            ))}
             {filters.search && (
               <Badge label={`"${filters.search}"`} color="#0ea5e9"
                 onRemove={() => { setSearchDraft(''); updateFilter('search', '') }} />
@@ -616,6 +634,21 @@ export default function ListExplorer() {
                 }
                 color="#8b5cf6"
                 onRemove={() => applyFilters({ ...filters, min_tokens: null, max_tokens: null })}
+              />
+            )}
+            {(filters.min_length != null || filters.max_length != null) && (
+              <Badge
+                label={
+                  filters.min_length != null && filters.max_length != null && filters.min_length === filters.max_length
+                    ? `${filters.min_length} chars`
+                    : filters.min_length != null && filters.max_length != null
+                    ? `${filters.min_length}–${filters.max_length} chars`
+                    : filters.min_length != null
+                    ? `≥${filters.min_length} chars`
+                    : `≤${filters.max_length} chars`
+                }
+                color="#8b5cf6"
+                onRemove={() => applyFilters({ ...filters, min_length: null, max_length: null })}
               />
             )}
           </div>

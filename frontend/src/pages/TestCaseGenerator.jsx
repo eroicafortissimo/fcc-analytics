@@ -1345,39 +1345,83 @@ export default function TestCaseGenerator() {
                 <p className="text-sm mt-1">Click Generate to create test cases — the log will show results here.</p>
               </div>
             ) : (
-              <div className="space-y-1 font-mono text-xs">
+              <div className="space-y-4">
                 {Object.entries(genResult.by_type || {}).flatMap(([typeId, typeResult]) => {
-                  const typeMeta = types.find(t => t.type_id === typeId)
-                  const typeName = typeMeta?.type_name || typeId
-                  return Object.entries(typeResult.by_entity_type || {}).map(([et, etResult]) => {
+                  const typeName = typeResult.type_name || typeId
+                  const typeTarget = typeResult.target || genResult.count_per_type || 0
+                  const typeComplete = typeResult.generated >= typeTarget
+                  const etSections = Object.entries(typeResult.by_entity_type || {}).filter(([, etResult]) =>
+                    etResult.reason !== 'not_applicable'
+                  ).map(([et, etResult]) => {
+                    const log = etResult.log || []
                     const ok = etResult.generated > 0
+                    // Each entity-type section target is count_per_type (per-et)
+                    const target = genResult.count_per_type || 0
+                    const complete = etResult.generated >= target
                     return (
-                      <div
-                        key={`${typeId}-${et}`}
-                        className={`flex items-start gap-3 px-3 py-1.5 rounded ${ok ? 'text-slate-400' : 'bg-slate-50'}`}
-                      >
-                        <span className={`flex-shrink-0 w-3 ${ok ? 'text-emerald-500' : 'text-slate-300'}`}>
-                          {ok ? '✓' : '○'}
-                        </span>
-                        <span className="text-slate-500 w-14 flex-shrink-0">{typeId}</span>
-                        <span className={`w-20 flex-shrink-0 ${ok ? '' : 'text-slate-500'}`}>{et}</span>
-                        <span className={ok ? 'text-emerald-600' : 'text-slate-400'}>
-                          {etResult.generated > 0
-                            ? `${etResult.generated} test cases generated${etResult.skipped > 0 ? `, ${etResult.skipped} skipped` : ''}`
-                            : `0 test cases`
-                          }
-                        </span>
-                        {!ok && etResult.reason && (
-                          <span className={`flex-1 ${REASON_COLOURS[etResult.reason] || 'text-slate-400'}`}>
-                            — {REASON_LABELS[etResult.reason] || etResult.reason}
+                      <div key={`${typeId}-${et}`} className="border border-slate-200 rounded-lg overflow-hidden">
+                        {/* Section header */}
+                        <div className={`flex items-center gap-3 px-4 py-2 text-xs font-semibold ${ok ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-50 text-slate-500'}`}>
+                          <span className={ok ? 'text-emerald-500' : 'text-slate-300'}>{ok ? '✓' : '○'}</span>
+                          <span className="font-mono">{typeId}</span>
+                          <span className="text-slate-400">·</span>
+                          <span>{et}</span>
+                          <span className="text-slate-400">·</span>
+                          <span className="truncate">{typeName}</span>
+                          <span className="ml-auto flex-shrink-0 flex items-center gap-3">
+                            <span className={`font-bold px-2 py-0.5 rounded ${complete ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-600'}`}>
+                              {etResult.generated}/{target}
+                            </span>
+                            {etResult.skipped > 0 && <span className="text-slate-400">{etResult.skipped} rejected</span>}
                           </span>
+                        </div>
+                        {/* Per-name log rows */}
+                        {log.length > 0 && (
+                          <div className="font-mono text-xs divide-y divide-slate-100 max-h-72 overflow-y-auto">
+                            {log.map((entry, i) => (
+                              <div key={i} className={`flex items-start gap-2 px-4 py-1.5 ${entry.accepted ? '' : 'bg-red-50/40'}`}>
+                                {entry.accepted ? (
+                                  <span className="flex-shrink-0 text-emerald-500 w-24 text-right">accepted-{entry.accepted_seq}</span>
+                                ) : (
+                                  <span className="flex-shrink-0 text-red-400 w-24 text-right">rejected-{entry.rejected_seq}</span>
+                                )}
+                                <span className="text-slate-600 flex-shrink-0 max-w-[220px] truncate" title={entry.source_name}>
+                                  {entry.source_name}
+                                </span>
+                                {entry.accepted ? (
+                                  <>
+                                    <span className="text-slate-300 flex-shrink-0">→</span>
+                                    <span className="text-slate-800 font-medium truncate" title={entry.variant}>{entry.variant}</span>
+                                  </>
+                                ) : (
+                                  <span className="text-red-400 truncate" title={entry.reject_reason}>— {entry.reject_reason}</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
                         )}
-                        {ok && (
-                          <span className="text-slate-300 truncate flex-1" title={typeName}>{typeName}</span>
+                        {log.length === 0 && etResult.reason && (
+                          <div className="px-4 py-2 text-xs text-slate-400">
+                            {REASON_LABELS[etResult.reason] || etResult.reason}
+                          </div>
                         )}
                       </div>
                     )
                   })
+                  // Prepend a type-level summary header when there are multiple entity-type sections
+                  const typeHeader = etSections.length > 1 ? (
+                    <div key={`${typeId}-header`} className={`flex items-center gap-3 px-4 py-1.5 rounded text-xs font-bold border ${typeComplete ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                      <span className="font-mono">{typeId}</span>
+                      <span className="text-slate-400">·</span>
+                      <span>{typeName}</span>
+                      <span className="ml-auto">
+                        <span className={`px-2 py-0.5 rounded font-bold ${typeComplete ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-600'}`}>
+                          {typeResult.generated}/{typeTarget} total
+                        </span>
+                      </span>
+                    </div>
+                  ) : null
+                  return typeHeader ? [typeHeader, ...etSections] : etSections
                 })}
               </div>
             )}

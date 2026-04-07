@@ -42,10 +42,14 @@ class ListFilters(BaseModel):
     watchlists: list[str] = []
     sub_watchlists: list[str] = []
     entity_types: list[str] = []
+    cultures: list[str] = []
     search: Optional[str] = None
     recently_modified_only: bool = False
+    programs: list[str] = []
     min_tokens: Optional[int] = None
     max_tokens: Optional[int] = None
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
     page: int = 1
     page_size: int = 100
 

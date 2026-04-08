@@ -33,6 +33,9 @@ export const thresholdApi = {
   simulate: (body) => axios.post(`${BASE}/analysis/simulate`, body),
   autoThresholds: (body) => axios.post(`${BASE}/analysis/auto-thresholds`, body),
 
+  // ATL/BTL
+  computeAtlBtl: (body) => axios.post(`${BASE}/analysis/atl-btl`, body),
+
   // Report
   generateReport: (analysis_id) => axios.post(`${BASE}/report/generate`, { analysis_id }),
 }

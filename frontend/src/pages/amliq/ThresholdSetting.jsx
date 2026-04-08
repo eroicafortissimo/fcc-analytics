@@ -8,7 +8,7 @@ import { thresholdApi } from '../../api/thresholdApi'
 
 // ── Step indicator ──────────────────────────────────────────────────────────
 
-const STEPS = ['Upload', 'Scenario', 'Configure', 'Analysis', 'Simulate', 'Report']
+const STEPS = ['Upload', 'Scenario', 'Configure', 'Analysis', 'Simulate', 'BTL']
 
 function StepIndicator({ current }) {
   return (
@@ -105,7 +105,11 @@ export default function ThresholdSetting() {
   const [analysisId, setAnalysisId] = useState(null)
   const [analysisTab, setAnalysisTab] = useState(0)   // 0=stats 1=events 2=transactions
   const [selectedEvent, setSelectedEvent] = useState(null)
-  const [eventsSort, setEventsSort] = useState({ col: null, dir: 'asc' })
+  const [eventsSort, setEventsSort] = useState([
+    { col: '', dir: 'asc' },
+    { col: '', dir: 'asc' },
+    { col: '', dir: 'asc' },
+  ])
   const [txSort, setTxSort] = useState({ col: null, dir: 'asc' })
 
   // Step 4 — Simulate
@@ -119,9 +123,13 @@ export default function ThresholdSetting() {
   const [simAlertsSort, setSimAlertsSort] = useState({ col: null, dir: 'asc' })
   const [simTxSort, setSimTxSort] = useState({ col: null, dir: 'asc' })
 
-  // Step 5 — Report
-  const [reportText, setReportText] = useState('')
-  const [reportLoading, setReportLoading] = useState(false)
+  // Step 5 — ATL/BTL
+  const [candidateThreshold, setCandidateThreshold] = useState(null)
+  const [atlBtlResult, setAtlBtlResult] = useState(null)
+  const [atlBtlLoading, setAtlBtlLoading] = useState(false)
+  const [atlBtlTab, setAtlBtlTab] = useState(0)
+  const [atlSelectedEvent, setAtlSelectedEvent] = useState(null)
+  const [atlTxSort, setAtlTxSort] = useState({ col: null, dir: 'asc' })
 
   useEffect(() => {
     thresholdApi.listDatasets().then(r => setDatasets(r.data)).catch(() => {})
@@ -130,6 +138,33 @@ export default function ThresholdSetting() {
   // ── Column list helpers ────────────────────────────────────────────────────
 
   const columns = (selectedDataset?.columns || []).map(colName)
+
+  // ── Auto-populate Configure defaults ──────────────────────────────────────
+  // Score a column name against a list of keyword fragments (higher = better match)
+  const scoreCol = (col, keywords) => {
+    const n = col.toLowerCase().replace(/[^a-z0-9]/g, '')
+    return keywords.reduce((s, kw) => s + (n.includes(kw) ? kw.length : 0), 0)
+  }
+  const bestMatch = (cols, keywords) => {
+    let best = '', bestScore = 0
+    for (const c of cols) {
+      const sc = scoreCol(c, keywords)
+      if (sc > bestScore) { bestScore = sc; best = c }
+    }
+    return best
+  }
+  const autoPopulateConfigure = (cols) => {
+    // Only fill if fields are still empty
+    const key = bestMatch(cols, ['customer', 'cust', 'client', 'account', 'acct', 'entity', 'party', 'sender', 'beneficiary', 'custid', 'accountid'])
+    const amt = bestMatch(cols, ['amount', 'amt', 'tran', 'transaction', 'value', 'payment', 'sum', 'total', 'usd', 'gbp', 'eur'])
+    const dt  = bestMatch(cols, ['date', 'tran', 'transaction', 'time', 'dt', 'timestamp', 'datetime', 'posted', 'settled', 'valuedate'])
+    setAnalysisType('aggregate')
+    if (key) setAggKey(key)
+    if (amt) { setAggAmount(amt); setParamColumn(amt) }
+    if (dt)  setAggDate(dt)
+    setAggPeriod('rolling_30')
+    setAggFunction('SUM')
+  }
 
   // ── Step 0 handlers ────────────────────────────────────────────────────────
 
@@ -284,7 +319,7 @@ export default function ThresholdSetting() {
       })
       setAnalysisTab(0)
       setSelectedEvent(null)
-      setEventsSort({ col: null, dir: 'asc' })
+      setEventsSort([{ col: '', dir: 'asc' }, { col: '', dir: 'asc' }, { col: '', dir: 'asc' }])
       setTxSort({ col: null, dir: 'asc' })
       setAnalysisId(d.analysis_id)
       setStep(3)
@@ -345,22 +380,23 @@ export default function ThresholdSetting() {
 
   // ── Step 5 handlers ────────────────────────────────────────────────────────
 
-  const handleGenerateReport = async () => {
-    if (!analysisId) return
-    setReportLoading(true)
+  const handleChooseCandidate = async (threshold) => {
+    setCandidateThreshold(threshold)
+    setAtlBtlResult(null)
+    setAtlBtlTab(0)
+    setAtlSelectedEvent(null)
+    setAtlTxSort({ col: null, dir: 'asc' })
+    setAtlBtlLoading(true)
+    setStep(5)
     try {
-      const r = await thresholdApi.generateReport(analysisId)
-      setReportText(r.data.report_text || '')
-    } catch {}
-    setReportLoading(false)
-  }
-
-  const handleDownloadReport = () => {
-    const blob = new Blob([reportText], { type: 'text/plain' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = 'threshold-report.txt'
-    a.click()
+      const body = { ...analysisContext, candidate_threshold: threshold }
+      const r = await thresholdApi.computeAtlBtl(body)
+      setAtlBtlResult(r.data)
+    } catch (err) {
+      alert(err?.response?.data?.detail || 'ATL/BTL computation failed')
+    } finally {
+      setAtlBtlLoading(false)
+    }
   }
 
   // ── Reset ──────────────────────────────────────────────────────────────────
@@ -370,7 +406,8 @@ export default function ThresholdSetting() {
     setSelectedDataset(null)
     setAnalysisResult(null)
     setSimResult(null)
-    setReportText('')
+    setCandidateThreshold(null)
+    setAtlBtlResult(null)
     setAnalysisId(null)
     setAnalysisContext(null)
   }
@@ -591,7 +628,7 @@ export default function ThresholdSetting() {
 
       <div className="flex justify-between">
         <button onClick={() => setStep(0)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
-        <button onClick={() => setStep(2)}
+        <button onClick={() => { autoPopulateConfigure(columns); setStep(2) }}
           className="px-5 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700">
           Next: Configure →
         </button>
@@ -722,28 +759,44 @@ export default function ThresholdSetting() {
     })()
 
     // Sort helpers
-    const applySort = (arr, sortState, numericCols = []) => {
+    const numCmp = (av, bv) => {
+      // Use Number() not parseFloat() — "2023-01-15" → NaN (correct), not 2023 (wrong)
+      const an = Number(av), bn = Number(bv)
+      if (!isNaN(an) && !isNaN(bn)) return an - bn
+      return String(av).localeCompare(String(bv))
+    }
+    const applyMultiSort = (arr, sorts) => {
+      const active = sorts.filter(s => s.col)
+      if (!active.length) return arr
+      return [...arr].sort((a, b) => {
+        for (const s of active) {
+          let av = a[s.col] ?? '', bv = b[s.col] ?? ''
+          const cmp = numCmp(av, bv)
+          if (cmp !== 0) return s.dir === 'asc' ? cmp : -cmp
+        }
+        return 0
+      })
+    }
+    const applySingleSort = (arr, sortState) => {
       if (!sortState.col) return arr
       return [...arr].sort((a, b) => {
-        let av = a[sortState.col], bv = b[sortState.col]
-        if (av == null) av = ''; if (bv == null) bv = ''
-        const an = parseFloat(av), bn = parseFloat(bv)
-        const cmp = (numericCols.includes(sortState.col) || (!isNaN(an) && !isNaN(bn)))
-          ? an - bn
-          : String(av).localeCompare(String(bv))
+        const cmp = numCmp(a[sortState.col] ?? '', b[sortState.col] ?? '')
         return sortState.dir === 'asc' ? cmp : -cmp
       })
     }
-    const toggleEvSort = col => setEventsSort(prev =>
-      prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
     const toggleTxSort = col => setTxSort(prev =>
       prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
     const SortIcon = ({ col, s }) => s.col !== col
       ? <span className="opacity-30 ml-1 text-[10px]">⇅</span>
       : <span className="text-teal-600 ml-1 text-[10px]">{s.dir === 'asc' ? '▲' : '▼'}</span>
 
-    const sortedEvents = applySort(events, eventsSort, ['days', 'sum', 'count'])
-    const sortedTx = applySort(visibleTx, txSort)
+    // Column options for events multi-sort
+    const evSortColOptions = isAggregate
+      ? [['key', agg_key_col], ['date_start', 'Start date'], ['date_end', 'End date'], ['days', 'Days'], ['sum', 'Sum'], ['count', 'Count']]
+      : raw_columns.map(c => [c, c === '_row' ? '#' : c])
+
+    const sortedEvents = applyMultiSort(events, eventsSort)
+    const sortedTx = applySingleSort(visibleTx, txSort)
 
     return (
       <div className="space-y-5">
@@ -777,6 +830,47 @@ export default function ThresholdSetting() {
               </p>
               <p className="text-xs text-slate-400">Click a row to filter full transactions tab</p>
             </div>
+
+            {/* Multi-sort controls */}
+            <div className="px-4 py-2.5 border-b border-slate-100 bg-slate-50 flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mr-1">Sort by</span>
+              {eventsSort.map((s, i) => (
+                <div key={i} className="flex items-center gap-1.5">
+                  {i > 0 && (
+                    <span className="text-[10px] text-slate-300 font-medium mx-0.5">then</span>
+                  )}
+                  <div className={`flex items-center rounded-lg border overflow-hidden transition-colors ${s.col ? 'border-teal-300 bg-white shadow-sm' : 'border-slate-200 bg-white'}`}>
+                    <span className={`px-2 py-1.5 text-[10px] font-bold border-r ${s.col ? 'text-teal-600 border-teal-200 bg-teal-50' : 'text-slate-400 border-slate-200 bg-slate-50'}`}>
+                      {i + 1}
+                    </span>
+                    <select
+                      value={s.col}
+                      onChange={e => setEventsSort(prev => prev.map((x, j) => j === i ? { ...x, col: e.target.value } : x))}
+                      className="text-xs px-2 py-1.5 bg-transparent text-slate-700 focus:outline-none max-w-[130px]">
+                      <option value="">— column —</option>
+                      {evSortColOptions.map(([val, label]) => (
+                        <option key={val} value={val}>{label}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => setEventsSort(prev => prev.map((x, j) => j === i ? { ...x, dir: x.dir === 'asc' ? 'desc' : 'asc' } : x))}
+                      disabled={!s.col}
+                      className={`px-2.5 py-1.5 text-[11px] font-medium border-l transition-colors disabled:opacity-30 disabled:cursor-default whitespace-nowrap
+                        ${s.col ? 'text-teal-700 border-teal-200 hover:bg-teal-50' : 'text-slate-400 border-slate-200'}`}>
+                      {s.dir === 'asc' ? '↑ A–Z' : '↓ Z–A'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {eventsSort.some(s => s.col) && (
+                <button
+                  onClick={() => setEventsSort([{ col: '', dir: 'asc' }, { col: '', dir: 'asc' }, { col: '', dir: 'asc' }])}
+                  className="ml-1 text-[10px] text-slate-400 hover:text-red-400 transition-colors px-1.5 py-1 rounded hover:bg-red-50">
+                  ✕ clear
+                </button>
+              )}
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide whitespace-nowrap">
@@ -791,20 +885,14 @@ export default function ThresholdSetting() {
                         ['sum', 'Sum', 'text-right'],
                         ['count', 'Count', 'text-right'],
                       ].map(([col, label, align]) => (
-                        <th key={col} onClick={() => toggleEvSort(col)}
-                          className={`px-4 py-2 ${align} cursor-pointer select-none hover:text-slate-700 whitespace-nowrap`}>
-                          {label}<SortIcon col={col} s={eventsSort} />
-                        </th>
+                        <th key={col} className={`px-4 py-2 ${align} whitespace-nowrap`}>{label}</th>
                       ))}
                       <th className="px-4 py-2 text-left">Transaction IDs</th>
                     </tr>
                   ) : (
                     <tr>
                       {raw_columns.map(c => (
-                        <th key={c} onClick={() => toggleEvSort(c)}
-                          className="px-3 py-2 text-left whitespace-nowrap cursor-pointer select-none hover:text-slate-700">
-                          {c}<SortIcon col={c} s={eventsSort} />
-                        </th>
+                        <th key={c} className="px-3 py-2 text-left whitespace-nowrap">{c === '_row' ? '#' : c}</th>
                       ))}
                     </tr>
                   )}
@@ -1210,22 +1298,31 @@ export default function ThresholdSetting() {
                       <th className="px-5 py-2 text-right whitespace-nowrap">% of txns</th>
                       <th className="px-5 py-2 text-right whitespace-nowrap">% of total $</th>
                       <th className="px-5 py-2 text-right whitespace-nowrap">Est. monthly</th>
+                      <th className="px-5 py-2 text-right"></th>
                     </tr>
                   </thead>
                   <tbody>
                     {simResult.results.map((r, i) => {
                       const pctile = r.events_pct != null ? 100 - r.events_pct : null
                       const isSelected = selectedSimThreshold === r.threshold
+                      const isCandidate = candidateThreshold === r.threshold
                       return (
                         <tr key={i}
                           onClick={() => { setSelectedSimThreshold(r.threshold); setSelectedSimEvent(null); setSimTab(1) }}
-                          className={`cursor-pointer transition-colors ${isSelected ? 'bg-teal-50' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
+                          className={`cursor-pointer transition-colors ${isCandidate ? 'bg-teal-50' : isSelected ? 'bg-slate-100' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/50 hover:bg-slate-100'}`}>
                           <td className="px-5 py-2 font-mono font-semibold text-slate-700">{fmtCurrency(r.threshold)}</td>
                           <td className="px-5 py-2 text-right text-slate-400 tabular-nums">{pctile != null ? `P${pctile.toFixed(0)}` : '—'}</td>
                           <td className="px-5 py-2 text-right">{r.alert_count?.toLocaleString()}</td>
                           <td className="px-5 py-2 text-right text-slate-500">{r.events_pct != null ? `${r.events_pct.toFixed(1)}%` : '—'}</td>
                           <td className="px-5 py-2 text-right">{r.volume_pct != null ? `${r.volume_pct.toFixed(1)}%` : '—'}</td>
                           <td className="px-5 py-2 text-right">{r.monthly_alerts?.toLocaleString() ?? '—'}</td>
+                          <td className="px-5 py-2 text-right">
+                            <button
+                              onClick={e => { e.stopPropagation(); handleChooseCandidate(r.threshold) }}
+                              className={`text-xs font-medium px-3 py-1 rounded-lg transition-colors ${isCandidate ? 'bg-teal-600 text-white' : 'border border-teal-300 text-teal-700 hover:bg-teal-50'}`}>
+                              {isCandidate ? '✓ Chosen' : 'Choose →'}
+                            </button>
+                          </td>
                         </tr>
                       )
                     })}
@@ -1415,46 +1512,296 @@ export default function ThresholdSetting() {
         </>
       )}
 
-      <div className="flex justify-between">
+      <div className="flex justify-between items-center">
         <button onClick={() => setStep(3)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
-        <button onClick={() => { setStep(5); handleGenerateReport() }}
-          className="px-5 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700">
-          Next: Report →
-        </button>
+        <p className="text-xs text-slate-400">Click <strong>Choose →</strong> on a threshold row to continue to BTL analysis</p>
       </div>
     </div>
     )
   }
 
-  const renderStep5 = () => (
+  const renderStep5 = () => {
+    const arEvents = analysisResult?.events || []
+    const arRawTx  = analysisResult?.raw_transactions || []
+    const arCols   = analysisResult?.raw_columns || []
+    const arAggKey = analysisResult?.agg_key_col || null
+    const arTidCol = analysisResult?.tid_col || null
+    const res      = atlBtlResult
+
+    // BTL zone events: sum is between BTL threshold and candidate threshold
+    const btlEvents = res
+      ? arEvents.filter(ev => ev.sum >= res.btl_threshold && ev.sum < res.candidate_threshold)
+      : []
+
+    const visibleTx = (() => {
+      if (!atlSelectedEvent) return arRawTx
+      if (atlSelectedEvent.transaction_ids?.length && arTidCol) {
+        const idSet = new Set(atlSelectedEvent.transaction_ids)
+        return arRawTx.filter(r => idSet.has(r[arTidCol]))
+      }
+      if (arAggKey) return arRawTx.filter(r => r[arAggKey] === atlSelectedEvent.key)
+      return arRawTx
+    })()
+
+    const toggleTx = col => setAtlTxSort(p =>
+      p.col === col ? { col, dir: p.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
+    const TxSortIcon = ({ col }) => atlTxSort.col !== col
+      ? <span className="opacity-30 ml-1 text-[10px]">⇅</span>
+      : <span className="text-teal-600 ml-1 text-[10px]">{atlTxSort.dir === 'asc' ? '▲' : '▼'}</span>
+    const sortedTx = atlTxSort.col ? [...visibleTx].sort((a, b) => {
+      const av = a[atlTxSort.col] ?? '', bv = b[atlTxSort.col] ?? ''
+      const an = Number(av), bn = Number(bv)
+      const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv))
+      return atlTxSort.dir === 'asc' ? cmp : -cmp
+    }) : visibleTx
+
+    const anchorCluster = res?.tranches.find(t => t.contains_candidate)
+
+    return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">AI-generated report</h3>
-        <div className="flex gap-2">
-          <button onClick={handleGenerateReport} disabled={reportLoading}
-            className="text-xs text-teal-600 font-medium border border-teal-200 rounded px-3 py-1 hover:bg-teal-50 disabled:opacity-40">
-            {reportLoading ? 'Generating…' : 'Regenerate'}
-          </button>
-          {reportText && (
-            <button onClick={handleDownloadReport}
-              className="text-xs text-slate-600 font-medium border border-slate-200 rounded px-3 py-1 hover:bg-slate-50">
-              Download
-            </button>
-          )}
+      {/* Header card */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="bg-slate-50 border border-slate-200 rounded-xl px-5 py-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">Candidate threshold</p>
+          <p className="text-2xl font-bold tabular-nums text-slate-700">{candidateThreshold != null ? fmtFull(candidateThreshold) : '—'}</p>
+          <p className="text-xs text-slate-400 mt-1">Chosen from simulation</p>
+        </div>
+        <div className={`rounded-xl px-5 py-4 border-2 col-span-2 ${res ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
+          <p className="text-xs font-semibold uppercase tracking-wide text-amber-600 mb-1">Suggested BTL threshold</p>
+          <p className={`text-3xl font-bold tabular-nums ${res ? 'text-amber-700' : 'text-slate-300'}`}>
+            {atlBtlLoading ? <span className="text-xl animate-pulse">Computing k-means…</span> : res ? fmtFull(res.btl_threshold) : '—'}
+          </p>
+          <p className="text-xs text-amber-600 mt-1">
+            {res && anchorCluster
+              ? `Lower bound of cluster ${anchorCluster.rank + 1} of ${res.optimal_k} · elbow method selected k=${res.optimal_k}`
+              : 'Awaiting k-means analysis'}
+          </p>
         </div>
       </div>
 
-      {reportLoading
-        ? <div className="bg-white border border-slate-200 rounded-xl p-8 text-center">
-            <p className="text-sm text-slate-400 animate-pulse">Generating report with AI…</p>
-          </div>
-        : reportText
-          ? <textarea value={reportText} onChange={e => setReportText(e.target.value)} rows={24}
-              className="w-full text-sm font-mono border border-slate-200 rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-teal-400" />
-          : <div className="bg-white border border-slate-200 rounded-xl p-8 text-center">
-              <p className="text-sm text-slate-400">No report yet — click Regenerate to create one.</p>
+      {/* Sub-tabs */}
+      <div className="flex items-center gap-0 border-b border-slate-200">
+        {[
+          ['Cluster analysis', 0],
+          [`BTL events (${btlEvents.length})`, 1],
+          ['Full transactions', 2],
+        ].map(([label, idx]) => (
+          <button key={idx} onClick={() => setAtlBtlTab(idx)}
+            className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px
+              ${atlBtlTab === idx ? 'border-teal-600 text-teal-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Tab 0: Cluster Analysis ── */}
+      {atlBtlTab === 0 && (
+        <div className="space-y-4">
+          {atlBtlLoading && (
+            <div className="bg-white border border-slate-200 rounded-xl p-10 text-center">
+              <p className="text-sm text-slate-400 animate-pulse">Running k-means clustering with elbow method…</p>
             </div>
-      }
+          )}
+          {res && (
+            <>
+              {/* Cluster table */}
+              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                  <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">
+                    K-means clusters — k={res.optimal_k}
+                  </p>
+                  <p className="text-xs text-slate-400">Candidate threshold falls in highlighted cluster → BTL = its lower bound</p>
+                </div>
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
+                    <tr>
+                      <th className="px-5 py-2 text-left">Cluster</th>
+                      <th className="px-5 py-2 text-right">Low</th>
+                      <th className="px-5 py-2 text-right">High</th>
+                      <th className="px-5 py-2 text-right">Center</th>
+                      <th className="px-5 py-2 text-right">Count</th>
+                      <th className="px-5 py-2 text-right">% of total</th>
+                      <th className="px-5 py-2 text-right">Role</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {res.tranches.map((t, i) => {
+                      const isAnchor = t.contains_candidate
+                      const role = isAnchor ? 'BTL anchor' : t.lo >= res.candidate_threshold ? 'Above candidate' : 'Below BTL'
+                      const roleColor = isAnchor
+                        ? 'text-amber-700 bg-amber-50 border border-amber-200'
+                        : t.lo >= res.candidate_threshold
+                          ? 'text-slate-500 bg-slate-100 border border-slate-200'
+                          : 'text-slate-400 bg-white border border-slate-200'
+                      return (
+                        <tr key={i} className={isAnchor ? 'bg-amber-50/50' : i % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'}>
+                          <td className="px-5 py-2.5 font-medium text-slate-700">Cluster {t.rank + 1}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-600">{fmtFull(t.lo)}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-600">{fmtFull(t.hi)}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums font-medium text-slate-700">{fmtFull(t.center)}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums">{t.count.toLocaleString()}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-500">{t.pct}%</td>
+                          <td className="px-5 py-2.5 text-right">
+                            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${roleColor}`}>{role}</span>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Elbow chart + rationale side by side */}
+              <div className="flex gap-4">
+                {res.elbow_data.length > 1 && (
+                  <div className="flex-1 bg-white border border-slate-200 rounded-xl p-5">
+                    <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">
+                      Elbow curve — optimal k={res.optimal_k}
+                    </p>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <ComposedChart data={res.elbow_data} margin={{ left: 10, right: 20, bottom: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                        <XAxis dataKey="k" tick={{ fontSize: 11 }} label={{ value: 'k (clusters)', position: 'insideBottom', offset: -4, fontSize: 10 }} />
+                        <YAxis tick={{ fontSize: 11 }} width={55}
+                          tickFormatter={v => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : v} />
+                        <Tooltip
+                          formatter={(v, name) => name === 'inertia' ? [v.toLocaleString(), 'Inertia'] : [`${v}%`, '% reduction']}
+                          labelFormatter={v => `k = ${v}`} />
+                        <Line type="monotone" dataKey="inertia" stroke="#0d9488" strokeWidth={2} dot={{ fill: '#0d9488', r: 4 }} name="inertia" />
+                        <ReferenceLine x={res.optimal_k} stroke="#f59e0b" strokeDasharray="4 4"
+                          label={{ value: `k=${res.optimal_k}`, fill: '#d97706', fontSize: 11, position: 'top' }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                {/* Rationale */}
+                <div className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-5">
+                  <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-3">Rationale</p>
+                  <pre className="text-xs text-slate-600 whitespace-pre-wrap font-mono leading-relaxed overflow-auto max-h-[220px]">
+                    {res.rationale}
+                  </pre>
+                </div>
+              </div>
+
+              {/* Zone summary — 2 zones only */}
+              <div className="bg-white border border-slate-200 rounded-xl px-5 py-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Zone definition</p>
+                <div className="flex gap-4">
+                  {[
+                    ['Below BTL', `< ${fmtFull(res.btl_threshold)}`, 'bg-slate-50 border-slate-200 text-slate-600', 'No enhanced review'],
+                    ['BTL zone', `${fmtFull(res.btl_threshold)} – ${fmtFull(res.candidate_threshold)}`, 'bg-amber-50 border-amber-200 text-amber-700', 'Enhanced monitoring'],
+                  ].map(([zone, range, cls, action]) => (
+                    <div key={zone} className={`flex-1 border rounded-xl p-4 ${cls}`}>
+                      <p className="font-semibold text-sm">{zone}</p>
+                      <p className="text-xs mt-1 font-mono">{range}</p>
+                      <p className="text-xs mt-2 opacity-70">{action}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Tab 1: BTL Events ── */}
+      {atlBtlTab === 1 && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+            <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide">
+              BTL events — {fmtFull(res?.btl_threshold ?? 0)} to {fmtFull(res?.candidate_threshold ?? 0)}
+            </p>
+            <p className="text-xs text-slate-400">Click a row to filter transactions</p>
+          </div>
+          {!res ? (
+            <div className="p-8 text-center text-sm text-slate-400">Run the cluster analysis first.</div>
+          ) : (
+            <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide sticky top-0 z-10 whitespace-nowrap">
+                  <tr>
+                    <th className="px-4 py-2 text-right w-10">#</th>
+                    <th className="px-4 py-2 text-left">{arAggKey || 'Key'}</th>
+                    <th className="px-4 py-2 text-right whitespace-nowrap">Start date</th>
+                    <th className="px-4 py-2 text-right whitespace-nowrap">End date</th>
+                    <th className="px-4 py-2 text-right">Days</th>
+                    <th className="px-4 py-2 text-right">Sum</th>
+                    <th className="px-4 py-2 text-right">Count</th>
+                    <th className="px-4 py-2 text-left">Transaction IDs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {btlEvents.map((ev, i) => {
+                    const isSelected = atlSelectedEvent?.key === ev.key && atlSelectedEvent?.date_start === ev.date_start
+                    const tidDisplay = ev.transaction_ids?.slice(0, 3).join(', ') + (ev.transaction_ids?.length > 3 ? ` +${ev.transaction_ids.length - 3} more` : '')
+                    return (
+                      <tr key={i}
+                        onClick={() => { setAtlSelectedEvent(isSelected ? null : ev); setAtlBtlTab(2) }}
+                        className={`cursor-pointer transition-colors ${isSelected ? 'bg-amber-50' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/40 hover:bg-slate-100'}`}>
+                        <td className="px-4 py-2 text-right text-slate-400 tabular-nums">{i + 1}</td>
+                        <td className="px-4 py-2 font-medium text-slate-800">{ev.key}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_start || '—'}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_end || '—'}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.days ?? '—'}</td>
+                        <td className="px-4 py-2 text-right font-semibold text-amber-700 tabular-nums">{fmtCurrency(ev.sum)}</td>
+                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.count?.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-slate-400 max-w-xs truncate" title={ev.transaction_ids?.join(', ')}>{tidDisplay}</td>
+                      </tr>
+                    )
+                  })}
+                  {btlEvents.length === 0 && (
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-400">No events in the BTL zone.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Tab 2: Full Transactions ── */}
+      {atlBtlTab === 2 && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+            <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Full transaction data</p>
+            {atlSelectedEvent ? (
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                  Filtered: {visibleTx.length} txns for <strong>{atlSelectedEvent.key}</strong>
+                  {atlSelectedEvent.date_start && <span className="ml-1">({atlSelectedEvent.date_start} → {atlSelectedEvent.date_end})</span>}
+                </span>
+                <button onClick={() => setAtlSelectedEvent(null)} className="text-xs text-slate-400 hover:text-red-500">✕ Clear</button>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400">{arRawTx.length.toLocaleString()} rows (select a BTL event to filter)</p>
+            )}
+          </div>
+          <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide sticky top-0 z-10 whitespace-nowrap">
+                <tr>
+                  {arCols.map(c => (
+                    <th key={c} onClick={() => c !== '_row' && toggleTx(c)}
+                      className={`px-3 py-2 text-left select-none ${c !== '_row' ? 'cursor-pointer hover:text-slate-700' : ''}`}>
+                      {c === '_row' ? '#' : c}{c !== '_row' && <TxSortIcon col={c} />}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedTx.map((row, i) => (
+                  <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}>
+                    {arCols.map(c => (
+                      <td key={c} className="px-3 py-2 text-slate-700 whitespace-nowrap">{row[c] ?? '—'}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="flex justify-between">
         <button onClick={() => setStep(4)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
@@ -1464,7 +1811,8 @@ export default function ThresholdSetting() {
         </button>
       </div>
     </div>
-  )
+    )
+  }
 
   const stepRenders = [renderStep0, renderStep1, renderStep2, renderStep3, renderStep4, renderStep5]
 

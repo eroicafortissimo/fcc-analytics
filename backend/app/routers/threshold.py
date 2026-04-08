@@ -82,6 +82,18 @@ class AIScenarioRequest(BaseModel):
 class ReportRequest(BaseModel):
     analysis_id: int
 
+class AtlBtlRequest(BaseModel):
+    dataset_id: int
+    filter_rules: dict = {}
+    analysis_type: str = "single"
+    aggregation_key: str = ""
+    aggregation_amount: str = ""
+    aggregation_date: str = ""
+    aggregation_period: str = "none"
+    aggregation_function: str = "SUM"
+    parameter_column: str = ""
+    candidate_threshold: float
+
 class AIPromptScenario(BaseModel):
     dataset_id: int
     prompt: str
@@ -485,9 +497,9 @@ async def run_analysis(body: AnalysisRequest, db: aiosqlite.Connection = Depends
             date_start = date_end = days = None
 
             if is_rolling and rolling_days and body.aggregation_date and body.aggregation_date in raw_df.columns:
-                # Rolling window: each df row is one transaction's window anchored at row[date_column]
-                window_end = pd.Timestamp(row[body.aggregation_date])
-                window_start = window_end - timedelta(days=rolling_days)
+                # Rolling window: transaction date is window START, window runs [d, d+N]
+                window_start = pd.Timestamp(row[body.aggregation_date])
+                window_end = window_start + timedelta(days=rolling_days)
                 raw_dates = pd.to_datetime(raw_df[body.aggregation_date], errors="coerce")
                 entity_rows = raw_df[
                     (raw_df[body.aggregation_key] == ekey) &
@@ -623,6 +635,44 @@ async def get_analysis(analysis_id: int, db: aiosqlite.Connection = Depends(get_
     for key in ("parameter_columns", "statistics", "threshold_values", "threshold_results"):
         d[key] = json.loads(d.get(key) or "null")
     return d
+
+
+# ── ATL/BTL analysis ───────────────────────────────────────────────────────────
+
+@router.post("/analysis/atl-btl")
+async def compute_atl_btl(body: AtlBtlRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """Run k-means clustering to suggest a BTL threshold below the chosen ATL threshold."""
+    mem = await _get_mem(body.dataset_id, db)
+    raw_df = svc.apply_filters(mem["df"], body.filter_rules)
+    if len(raw_df) == 0:
+        raise HTTPException(status_code=400, detail="No rows match the current filters")
+
+    is_aggregate = body.analysis_type == "aggregate" and body.aggregation_key and body.aggregation_amount
+    if is_aggregate:
+        try:
+            df = svc.aggregate_transactions(
+                raw_df,
+                key_column=body.aggregation_key,
+                amount_column=body.aggregation_amount,
+                period=body.aggregation_period,
+                agg_function=body.aggregation_function,
+                date_column=body.aggregation_date or None,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Aggregation error: {e}")
+        series = df["agg_value"]
+    else:
+        col = body.parameter_column
+        if not col or col not in raw_df.columns:
+            raise HTTPException(status_code=400, detail=f"Column '{col}' not found")
+        series = raw_df[col]
+
+    try:
+        result = svc.suggest_btl_kmeans(series, body.candidate_threshold)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"K-means error: {e}")
+
+    return result
 
 
 # ── Report generation ──────────────────────────────────────────────────────────

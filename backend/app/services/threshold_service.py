@@ -250,11 +250,11 @@ def aggregate_transactions(
             group = group.sort_values(date_column)
             dates = group[date_column].values
             amounts = group[amount_column].values
-            # For each transaction, compute window [date-N, date]
+            # For each transaction, compute window [date, date+N] — transaction is window start
             for i, (d, a) in enumerate(zip(dates, amounts)):
-                cutoff = pd.Timestamp(d) - timedelta(days=days)
+                cutoff = pd.Timestamp(d) + timedelta(days=days)
                 window = amounts[
-                    (dates >= np.datetime64(cutoff)) & (dates <= d)
+                    (dates >= d) & (dates <= np.datetime64(cutoff))
                 ]
                 if agg_fn == "SUM":
                     val = float(window.sum())
@@ -547,6 +547,145 @@ def recommend_threshold(
             f"captures {best['pct_volume_captured']}% of volume with {best['alert_count']:,} alerts "
             f"({best['est_monthly_alerts']:,} estimated/month)."
         ),
+    }
+
+
+# ── ATL/BTL k-means analysis ───────────────────────────────────────────────────
+
+def suggest_btl_kmeans(series: pd.Series, candidate_threshold: float) -> dict:
+    """
+    Use k-means with elbow method to segment the value distribution.
+    BTL threshold = lower bound of the cluster containing the candidate threshold.
+    """
+    from sklearn.cluster import KMeans
+
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    n = len(s)
+    if n < 4:
+        return {
+            "btl_threshold": round(float(s.min()), 2) if n else 0.0,
+            "candidate_threshold": round(candidate_threshold, 2),
+            "optimal_k": 1,
+            "tranches": [],
+            "elbow_data": [],
+            "rationale": "Insufficient data for clustering.",
+        }
+
+    values = s.values.reshape(-1, 1)
+    max_k = min(10, n // 3)
+    ks = list(range(2, max_k + 1))
+    inertias = []
+    for k in ks:
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        km.fit(values)
+        inertias.append(float(km.inertia_))
+
+    # Percent reduction in inertia at each step
+    pct_reductions = [None] + [
+        round((inertias[i - 1] - inertias[i]) / inertias[i - 1] * 100, 1)
+        for i in range(1, len(inertias))
+    ]
+
+    # Elbow: second derivative peak = sharpest marginal drop-off
+    if len(inertias) >= 3:
+        d2 = np.diff(np.diff(inertias))
+        elbow_pos = int(np.argmax(d2)) + 1
+        optimal_k = ks[elbow_pos]
+    else:
+        elbow_pos = 0
+        optimal_k = ks[0]
+
+    # Final fit
+    km = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
+    km.fit(values)
+    labels = km.labels_
+    centers = km.cluster_centers_.flatten()
+
+    # Build sorted tranches (rank 0 = lowest)
+    center_order = np.argsort(centers)
+    tranches = []
+    for rank, orig_label in enumerate(center_order):
+        mask = labels == orig_label
+        cluster_vals = s.values[mask]
+        lo = float(cluster_vals.min())
+        hi = float(cluster_vals.max())
+        tranches.append({
+            "rank": rank,
+            "lo": round(lo, 2),
+            "hi": round(hi, 2),
+            "center": round(float(centers[orig_label]), 2),
+            "count": int(mask.sum()),
+            "pct": round(int(mask.sum()) / n * 100, 1),
+            "contains_candidate": lo <= candidate_threshold <= hi,
+        })
+
+    # Find anchor cluster
+    anchor = next((t for t in tranches if t["contains_candidate"]), None)
+    if anchor is None:
+        anchor = min(tranches, key=lambda t: min(
+            abs(t["lo"] - candidate_threshold), abs(t["hi"] - candidate_threshold)
+        ))
+        anchor = dict(anchor, contains_candidate=True)
+        tranches = [anchor if t["rank"] == anchor["rank"] else t for t in tranches]
+
+    btl_threshold = round(anchor["lo"], 2)
+
+    # ── Rationale ──────────────────────────────────────────────────────────────
+    elbow_pct_before = pct_reductions[elbow_pos] if elbow_pos < len(pct_reductions) else None
+    elbow_pct_after  = pct_reductions[elbow_pos + 1] if elbow_pos + 1 < len(pct_reductions) else None
+
+    lines = [
+        f"Why k={optimal_k}?",
+        "",
+        "Inertia measures total within-cluster variance — lower is better, but adding more clusters always "
+        "reduces it. The elbow method finds where additional clusters stop providing meaningful improvement.",
+        "",
+        "Inertia reduction by step:",
+    ]
+    for i, k in enumerate(ks):
+        pct = pct_reductions[i]
+        marker = "  <-- elbow" if k == optimal_k else ""
+        if pct is None:
+            lines.append(f"  k={k}:  {inertias[i]:>15,.0f}  (baseline){marker}")
+        else:
+            lines.append(f"  k={k}:  {inertias[i]:>15,.0f}  ({pct:+.1f}% vs k={ks[i-1]}){marker}")
+
+    lines += [""]
+    if elbow_pct_before is not None and elbow_pct_after is not None:
+        lines.append(
+            f"The second derivative of inertia peaks at k={optimal_k}: inertia dropped "
+            f"{elbow_pct_before}% moving from k={optimal_k - 1} to k={optimal_k}, but only "
+            f"{elbow_pct_after}% from k={optimal_k} to k={optimal_k + 1}. "
+            f"This sharp deceleration marks the elbow — adding a {optimal_k + 1}th cluster "
+            f"would yield {elbow_pct_after}% less compactness improvement for significant added complexity."
+        )
+    elif elbow_pct_before is not None:
+        lines.append(
+            f"k={optimal_k} was selected; inertia dropped {elbow_pct_before}% at this step "
+            "and diminishing returns were observed beyond it."
+        )
+    else:
+        lines.append(f"k={optimal_k} was selected as the minimum tested value.")
+
+    lines += [
+        "",
+        f"BTL result: The candidate threshold {_fmt(candidate_threshold)} falls in cluster "
+        f"{anchor['rank'] + 1} of {optimal_k} (range {_fmt(anchor['lo'])} to {_fmt(anchor['hi'])}, "
+        f"center {_fmt(anchor['center'])}, {anchor['count']:,} transactions / {anchor['pct']}% of total). "
+        f"The BTL threshold is set to the lower bound of this cluster: {_fmt(btl_threshold)}.",
+    ]
+
+    return {
+        "btl_threshold": btl_threshold,
+        "candidate_threshold": round(candidate_threshold, 2),
+        "optimal_k": optimal_k,
+        "tranches": tranches,
+        "elbow_data": [
+            {"k": k, "inertia": round(iner, 0), "pct_reduction": pct_reductions[i]}
+            for i, (k, iner) in enumerate(zip(ks, inertias))
+        ],
+        "rationale": "
+".join(lines),
     }
 
 

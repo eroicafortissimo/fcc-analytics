@@ -621,7 +621,7 @@ async def auto_thresholds(body: AnalysisRequest, db: aiosqlite.Connection = Depe
     if col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Column '{col}' not found")
     s = df[col].dropna()
-    pcts = [50, 75, 85, 90, 95, 99]
+    pcts = [50, 75, 80, 85, 90, 95, 99]
     return {"thresholds": [round(float(s.quantile(p / 100)), 2) for p in pcts], "percentiles": pcts}
 
 
@@ -635,6 +635,42 @@ async def get_analysis(analysis_id: int, db: aiosqlite.Connection = Depends(get_
     for key in ("parameter_columns", "statistics", "threshold_values", "threshold_results"):
         d[key] = json.loads(d.get(key) or "null")
     return d
+
+
+# ── Percentile curve ───────────────────────────────────────────────────────────
+
+@router.post("/analysis/percentile-curve")
+async def percentile_curve(body: AnalysisRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """
+    Return alert counts at every integer percentile P50–P100.
+    Runs in parallel with simulate — no added wall-clock latency.
+    """
+    mem = await _get_mem(body.dataset_id, db)
+    raw_df = svc.apply_filters(mem["df"], body.filter_rules)
+    if len(raw_df) == 0:
+        return []
+
+    is_aggregate = body.analysis_type == "aggregate" and body.aggregation_key and body.aggregation_amount
+    if is_aggregate:
+        try:
+            df = svc.aggregate_transactions(
+                raw_df,
+                key_column=body.aggregation_key,
+                amount_column=body.aggregation_amount,
+                period=body.aggregation_period,
+                agg_function=body.aggregation_function,
+                date_column=body.aggregation_date or None,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Aggregation error: {e}")
+        series = df["agg_value"]
+    else:
+        col = body.parameter_column
+        if not col or col not in raw_df.columns:
+            raise HTTPException(status_code=400, detail=f"Column '{col}' not found")
+        series = raw_df[col]
+
+    return svc.compute_percentile_curve(series)
 
 
 # ── ATL/BTL analysis ───────────────────────────────────────────────────────────
@@ -672,6 +708,7 @@ async def compute_atl_btl(body: AtlBtlRequest, db: aiosqlite.Connection = Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"K-means error: {e}")
 
+    result["p95"] = float(series.quantile(0.95))
     return result
 
 

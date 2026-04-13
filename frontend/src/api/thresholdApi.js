@@ -33,6 +33,9 @@ export const thresholdApi = {
   simulate: (body) => axios.post(`${BASE}/analysis/simulate`, body),
   autoThresholds: (body) => axios.post(`${BASE}/analysis/auto-thresholds`, body),
 
+  // Percentile curve (P50–P100 alert counts for charting)
+  percentileCurve: (body) => axios.post(`${BASE}/analysis/percentile-curve`, body),
+
   // ATL/BTL
   computeAtlBtl: (body) => axios.post(`${BASE}/analysis/atl-btl`, body),
 

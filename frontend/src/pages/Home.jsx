@@ -100,6 +100,25 @@ export default function Home() {
         </div>
       </div>
 
+      {/* False Positive Suppression */}
+      <div className="space-y-4">
+        <SectionDivider label="False Positive Suppression" color="bg-green-600" />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <ToolCard
+            to="/screeniq/rule-automation"
+            title="Rules Manager"
+            description="Create suppression rules from plain-language descriptions using AI, interpret existing rules to understand what they do, and generate detailed rule logs showing field impact and composition."
+            accent="border-l-green-600"
+          />
+          <ToolCard
+            to="/screeniq/good-guys"
+            title="Good Guys Manager"
+            description="Create and manage trusted entity and whitelist rules. Interpret existing good guys rule files, visualize rule inventories, and generate comprehensive logs of trusted entity rule composition."
+            accent="border-l-green-600"
+          />
+        </div>
+      </div>
+
       {/* Tech stack */}
       <p className="text-xs text-center text-slate-400 pt-2">
         React · FastAPI · LangChain / LangGraph · Claude API · SQLite · Recharts

@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { useNavigate, useLocation } from 'react-router-dom'
 import {
-  LineChart, Line, BarChart, Bar, ComposedChart,
+  LineChart, Line, AreaChart, Area, BarChart, Bar, ComposedChart,
   ScatterChart, Scatter, ReferenceLine,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ZAxis
 } from 'recharts'
@@ -8,29 +9,37 @@ import { thresholdApi } from '../../api/thresholdApi'
 
 // ── Step indicator ──────────────────────────────────────────────────────────
 
-const STEPS = ['Upload', 'Scenario', 'Configure', 'Analysis', 'Simulate', 'BTL']
+const STEPS = ['Upload', 'Scenario', 'Configure', 'Analysis', 'Simulate']
 
-function StepIndicator({ current }) {
+function StepIndicator({ current, onStepClick }) {
   return (
     <div className="flex items-center gap-0 mb-8">
-      {STEPS.map((s, i) => (
-        <div key={i} className="flex items-center">
-          <div className="flex flex-col items-center">
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-colors
-              ${i < current ? 'bg-teal-600 border-teal-600 text-white'
-                : i === current ? 'bg-white border-teal-600 text-teal-700'
-                : 'bg-white border-slate-300 text-slate-400'}`}>
-              {i < current ? '✓' : i + 1}
+      {STEPS.map((s, i) => {
+        const reachable = i <= current
+        return (
+          <div key={i} className="flex items-center">
+            <div className="flex flex-col items-center">
+              <button
+                onClick={() => reachable && onStepClick(i)}
+                disabled={!reachable}
+                className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-colors
+                  ${i < current ? 'bg-teal-600 border-teal-600 text-white hover:bg-teal-700 cursor-pointer'
+                    : i === current ? 'bg-white border-teal-600 text-teal-700 cursor-default'
+                    : 'bg-white border-slate-300 text-slate-400 cursor-not-allowed'}`}
+              >
+                {i < current ? '✓' : i + 1}
+              </button>
+              <span className={`text-xs mt-1 font-medium ${i === current ? 'text-teal-700' : i < current ? 'text-teal-600 cursor-pointer' : 'text-slate-400'}`}
+                onClick={() => reachable && onStepClick(i)}>
+                {s}
+              </span>
             </div>
-            <span className={`text-xs mt-1 font-medium ${i === current ? 'text-teal-700' : i < current ? 'text-teal-600' : 'text-slate-400'}`}>
-              {s}
-            </span>
+            {i < STEPS.length - 1 && (
+              <div className={`h-0.5 w-12 mx-1 mb-4 ${i < current ? 'bg-teal-600' : 'bg-slate-200'}`} />
+            )}
           </div>
-          {i < STEPS.length - 1 && (
-            <div className={`h-0.5 w-12 mx-1 mb-4 ${i < current ? 'bg-teal-600' : 'bg-slate-200'}`} />
-          )}
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -65,6 +74,8 @@ const colName = (c) => (typeof c === 'string' ? c : c?.name)
 // ── Main component ──────────────────────────────────────────────────────────
 
 export default function ThresholdSetting() {
+  const navigate = useNavigate()
+  const location = useLocation()
   const [step, setStep] = useState(0)
 
   // Step 0 — Upload
@@ -114,6 +125,8 @@ export default function ThresholdSetting() {
 
   // Step 4 — Simulate
   const [thresholdInputs, setThresholdInputs] = useState(['', '', ''])
+  const [focusedInput, setFocusedInput] = useState(null)
+  const [simCurveData, setSimCurveData] = useState(null)
   const [simResult, setSimResult] = useState(null)
   const [simLoading, setSimLoading] = useState(false)
   const [autoLoading, setAutoLoading] = useState(false)
@@ -123,17 +136,24 @@ export default function ThresholdSetting() {
   const [simAlertsSort, setSimAlertsSort] = useState({ col: null, dir: 'asc' })
   const [simTxSort, setSimTxSort] = useState({ col: null, dir: 'asc' })
 
-  // Step 5 — ATL/BTL
+  // BTL — candidate threshold (kept for "✓ Chosen" highlight in Simulate step)
   const [candidateThreshold, setCandidateThreshold] = useState(null)
-  const [atlBtlResult, setAtlBtlResult] = useState(null)
-  const [atlBtlLoading, setAtlBtlLoading] = useState(false)
-  const [atlBtlTab, setAtlBtlTab] = useState(0)
-  const [atlSelectedEvent, setAtlSelectedEvent] = useState(null)
-  const [atlTxSort, setAtlTxSort] = useState({ col: null, dir: 'asc' })
+  const [btlCustomThreshold, setBtlCustomThreshold] = useState('')
 
   useEffect(() => {
     thresholdApi.listDatasets().then(r => setDatasets(r.data)).catch(() => {})
   }, [])
+
+  // Restore simulation state when returning from BTL module
+  useEffect(() => {
+    const s = location.state
+    if (!s?.returnFromBTL) return
+    if (s.analysisContext)  setAnalysisContext(s.analysisContext)
+    if (s.analysisResult)   setAnalysisResult(s.analysisResult)
+    if (s.simResult)        setSimResult(s.simResult)
+    if (s.thresholdInputs)  setThresholdInputs(s.thresholdInputs)
+    setStep(4)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Column list helpers ────────────────────────────────────────────────────
 
@@ -339,8 +359,7 @@ export default function ThresholdSetting() {
       const r = await thresholdApi.autoThresholds(analysisContext)
       const byPct = {}
       ;(r.data.percentiles || []).forEach((p, i) => { byPct[p] = r.data.thresholds[i] })
-      const empty = thresholdInputs.filter(v => v === '').length
-      const slots = empty <= 1 ? [85] : empty === 2 ? [85, 95] : [75, 85, 95]
+      const slots = [75, 80, 85]
       setThresholdInputs(slots.map(p => byPct[p] != null ? String(byPct[p]) : '').concat(['', '', '']).slice(0, 3))
     } catch {}
     setAutoLoading(false)
@@ -348,12 +367,18 @@ export default function ThresholdSetting() {
 
   const handleSimulate = async () => {
     if (!analysisContext) return
-    const vals = thresholdInputs.map(v => parseFloat(v)).filter(v => !isNaN(v))
+    const vals = thresholdInputs
+      .map(v => parseFloat(String(v).replace(/[^0-9.]/g, '')))
+      .filter(v => !isNaN(v) && v > 0)
     if (!vals.length) return
     setSimLoading(true)
     try {
       const body = { ...analysisContext, analysis_id: analysisId, thresholds: vals }
-      const r = await thresholdApi.simulate(body)
+      const [r, curveR] = await Promise.all([
+        thresholdApi.simulate(body),
+        thresholdApi.percentileCurve(body),
+      ])
+      setSimCurveData(curveR.data || [])
       const d = r.data
       // Normalize field names for display
       const results = (d.results || []).map(row => ({
@@ -378,25 +403,21 @@ export default function ThresholdSetting() {
     }
   }
 
-  // ── Step 5 handlers ────────────────────────────────────────────────────────
+  // ── Step 4 → BTL module ────────────────────────────────────────────────────
 
-  const handleChooseCandidate = async (threshold) => {
+  const handleChooseCandidate = (threshold, customBtl) => {
     setCandidateThreshold(threshold)
-    setAtlBtlResult(null)
-    setAtlBtlTab(0)
-    setAtlSelectedEvent(null)
-    setAtlTxSort({ col: null, dir: 'asc' })
-    setAtlBtlLoading(true)
-    setStep(5)
-    try {
-      const body = { ...analysisContext, candidate_threshold: threshold }
-      const r = await thresholdApi.computeAtlBtl(body)
-      setAtlBtlResult(r.data)
-    } catch (err) {
-      alert(err?.response?.data?.detail || 'ATL/BTL computation failed')
-    } finally {
-      setAtlBtlLoading(false)
-    }
+    const btlVal = customBtl != null ? customBtl : (btlCustomThreshold !== '' ? parseFloat(btlCustomThreshold.replace(/[^0-9.]/g, '')) || null : null)
+    navigate('/amliq/atlbtl', {
+      state: {
+        analysisContext,
+        candidateThreshold: threshold,
+        analysisResult,
+        simResult,
+        thresholdInputs,
+        btlCustomThreshold: btlVal,
+      },
+    })
   }
 
   // ── Reset ──────────────────────────────────────────────────────────────────
@@ -406,8 +427,8 @@ export default function ThresholdSetting() {
     setSelectedDataset(null)
     setAnalysisResult(null)
     setSimResult(null)
+    setSimCurveData(null)
     setCandidateThreshold(null)
-    setAtlBtlResult(null)
     setAnalysisId(null)
     setAnalysisContext(null)
   }
@@ -1238,6 +1259,22 @@ export default function ThresholdSetting() {
       ? `Alerts ≥ ${fmtCurrency(selectedSimThreshold)} (${simAlerts.length.toLocaleString()})`
       : 'Alerts (select a threshold)'
 
+    // Interpolate percentile from CDF for a given threshold value
+    const computePercentile = (threshold) => {
+      const cdf = analysisResult?.cdf
+      if (!cdf?.length || threshold == null || isNaN(threshold)) return null
+      if (threshold <= cdf[0].value) return cdf[0].all_pct ?? null
+      if (threshold >= cdf[cdf.length - 1].value) return 100
+      for (let i = 1; i < cdf.length; i++) {
+        if (threshold <= cdf[i].value) {
+          const lo = cdf[i - 1], hi = cdf[i]
+          const t = (threshold - lo.value) / (hi.value - lo.value)
+          return (lo.all_pct ?? 0) + t * ((hi.all_pct ?? 100) - (lo.all_pct ?? 0))
+        }
+      }
+      return 100
+    }
+
     return (
     <div className="space-y-6">
       <div>
@@ -1249,13 +1286,42 @@ export default function ThresholdSetting() {
           </button>
         </div>
         <div className="flex gap-3 mb-3">
-          {thresholdInputs.map((v, i) => (
-            <input key={i} value={v}
-              onChange={e => setThresholdInputs(prev => prev.map((x, j) => j === i ? e.target.value : x))}
-              placeholder={`Threshold ${i + 1}`}
-              className="flex-1 text-sm border border-slate-200 rounded-lg px-3 py-2 font-mono"
-            />
-          ))}
+          {thresholdInputs.map((v, i) => {
+            const numVal = parseFloat(v)
+            const pctile = !isNaN(numVal) ? computePercentile(numVal) : null
+            const isFocused = focusedInput === i
+            const displayVal = (!isFocused && v !== '' && !isNaN(numVal))
+              ? fmtCurrency(numVal)
+              : v
+            return (
+              <div key={i} className="flex-1 relative">
+                <input
+                  value={displayVal}
+                  onFocus={() => setFocusedInput(i)}
+                  onBlur={() => {
+                    setFocusedInput(null)
+                    // Use functional update to read latest value (avoids stale closure)
+                    setThresholdInputs(prev => {
+                      const current = String(prev[i] ?? '').replace(/[^0-9.]/g, '')
+                      const clean = parseFloat(current)
+                      return prev.map((x, j) => j === i ? (isNaN(clean) ? '' : String(clean)) : x)
+                    })
+                  }}
+                  onChange={e => {
+                    const raw = e.target.value.replace(/[^0-9.]/g, '')
+                    setThresholdInputs(prev => prev.map((x, j) => j === i ? raw : x))
+                  }}
+                  placeholder={`Threshold ${i + 1}`}
+                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 font-mono pr-12"
+                />
+                {pctile != null && (
+                  <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-slate-400/60 font-medium select-none pointer-events-none tabular-nums">
+                    P{pctile.toFixed(0)}
+                  </span>
+                )}
+              </div>
+            )
+          })}
         </div>
         <button onClick={handleSimulate} disabled={simLoading}
           className="px-5 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 disabled:opacity-40">
@@ -1329,6 +1395,117 @@ export default function ThresholdSetting() {
                   </tbody>
                 </table>
               </div>
+
+              {/* ── Custom BTL threshold ── */}
+              <div className="bg-white border border-slate-200 rounded-xl px-5 py-4 flex flex-wrap items-center gap-4">
+                <div>
+                  <p className="text-xs font-semibold text-slate-700">Custom BTL threshold</p>
+                  <p className="text-xs text-slate-400 mt-0.5">Override the auto-suggested BTL value when going to ATL / BTL analysis</p>
+                </div>
+                <div className="flex items-center gap-2 ml-auto">
+                  <input
+                    value={btlCustomThreshold}
+                    onChange={e => setBtlCustomThreshold(e.target.value.replace(/[^0-9.]/g, ''))}
+                    placeholder="e.g. 25000"
+                    className="text-sm border border-slate-200 rounded-lg px-3 py-2 font-mono w-40"
+                  />
+                  {btlCustomThreshold !== '' && (
+                    <button
+                      onClick={() => setBtlCustomThreshold('')}
+                      className="text-xs text-slate-400 hover:text-slate-600 px-2 py-2">✕</button>
+                  )}
+                  <span className="text-xs text-slate-400">
+                    {btlCustomThreshold !== '' && !isNaN(parseFloat(btlCustomThreshold))
+                      ? `Will use $${Number(btlCustomThreshold).toLocaleString()} as BTL`
+                      : 'Leave blank to use auto-suggested value'}
+                  </span>
+                </div>
+              </div>
+
+              {/* ── Full-range alert-count line chart (P50–P100 from server) ── */}
+              {(() => {
+                const lineData = (simCurveData || []).slice().reverse().map(pt => ({
+                  pct: pt.pct,
+                  alerts: pt.alerts,
+                  threshold: pt.threshold,
+                }))
+                // deltaData: alerts gained by lowering the threshold one step (going P100→P50)
+                const deltaData = lineData.slice(0, -1).map((pt, i) => ({
+                  pct: pt.pct,
+                  drop: lineData[i + 1].alerts - pt.alerts,
+                }))
+                const yFmt = v => v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(v)
+                if (lineData.length < 2) return null
+                return (
+                  <div className="space-y-4">
+                    {/* Line chart: expected alerts by percentile */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                      <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Expected alerts by threshold (P100–P50)</p>
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart syncId="sim-curve" data={lineData} margin={{ left: 10, right: 24, bottom: 18 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                          <XAxis dataKey="pct" type="number" domain={[100, 50]} reversed tick={{ fontSize: 11 }}
+                            tickFormatter={v => `P${v}`}
+                            label={{ value: 'Percentile', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#94a3b8' }} />
+                          <YAxis tick={{ fontSize: 11 }} width={50} tickFormatter={yFmt} />
+                          <Tooltip
+                            content={({ active, payload }) => {
+                              if (!active || !payload?.length) return null
+                              const d = payload[0].payload
+                              return (
+                                <div className="bg-white border border-slate-200 rounded-lg shadow-sm px-3 py-2 text-xs">
+                                  <p className="font-semibold text-slate-700 mb-1">P{d.pct}</p>
+                                  <p className="text-teal-700">{d.alerts.toLocaleString()} alerts</p>
+                                  <p className="text-slate-400">{fmtFull(d.threshold)}</p>
+                                </div>
+                              )
+                            }}
+                          />
+                          <Line type="monotone" dataKey="alerts" stroke="#0d9488" strokeWidth={2} dot={false} />
+                          {simResult.results.map(r => {
+                            const pct = r.events_pct != null ? Math.round((100 - r.events_pct) * 10) / 10 : null
+                            return pct != null && pct >= 50 ? (
+                              <ReferenceLine key={r.threshold} x={pct} stroke="#f59e0b" strokeDasharray="4 3"
+                                label={{ value: fmtCurrency(r.threshold), fill: '#d97706', fontSize: 10, position: 'insideTopRight' }} />
+                            ) : null
+                          })}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                    {/* Area chart: drop in alerts per percentile step */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                      <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-1">Change in alerts per percentile step</p>
+                      <p className="text-xs text-slate-400 mb-4">Alerts gained by lowering the threshold one step</p>
+                      <ResponsiveContainer width="100%" height={160}>
+                        <AreaChart syncId="sim-curve" data={deltaData} margin={{ left: 10, right: 24, bottom: 18 }}>
+                          <defs>
+                            <linearGradient id="dropGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#0d9488" stopOpacity={0.25} />
+                              <stop offset="95%" stopColor="#0d9488" stopOpacity={0.02} />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                          <XAxis dataKey="pct" type="number" domain={[100, 50]} reversed tick={{ fontSize: 11 }}
+                            tickFormatter={v => `P${v}`}
+                            label={{ value: 'Percentile', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#94a3b8' }} />
+                          <YAxis tick={{ fontSize: 11 }} width={50} tickFormatter={yFmt} />
+                          <Tooltip
+                            formatter={v => [v.toLocaleString(), 'Alerts at this step']}
+                            labelFormatter={v => `P${v}`} />
+                          <Area type="monotone" dataKey="drop" stroke="#0d9488" strokeWidth={1.5}
+                            fill="url(#dropGrad)" />
+                          {simResult.results.map(r => {
+                            const pct = r.events_pct != null ? Math.round((100 - r.events_pct) * 10) / 10 : null
+                            return pct != null && pct >= 50 ? (
+                              <ReferenceLine key={r.threshold} x={pct} stroke="#f59e0b" strokeDasharray="4 3" />
+                            ) : null
+                          })}
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                )
+              })()}
 
               {simResult.results.length > 1 && (
                 <div className="flex gap-4">
@@ -1514,307 +1691,13 @@ export default function ThresholdSetting() {
 
       <div className="flex justify-between items-center">
         <button onClick={() => setStep(3)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
-        <p className="text-xs text-slate-400">Click <strong>Choose →</strong> on a threshold row to continue to BTL analysis</p>
+        <p className="text-xs text-slate-400">Click <strong>Choose →</strong> on a threshold row to open BTL analysis</p>
       </div>
     </div>
     )
   }
 
-  const renderStep5 = () => {
-    const arEvents = analysisResult?.events || []
-    const arRawTx  = analysisResult?.raw_transactions || []
-    const arCols   = analysisResult?.raw_columns || []
-    const arAggKey = analysisResult?.agg_key_col || null
-    const arTidCol = analysisResult?.tid_col || null
-    const res      = atlBtlResult
-
-    // BTL zone events: sum is between BTL threshold and candidate threshold
-    const btlEvents = res
-      ? arEvents.filter(ev => ev.sum >= res.btl_threshold && ev.sum < res.candidate_threshold)
-      : []
-
-    const visibleTx = (() => {
-      if (!atlSelectedEvent) return arRawTx
-      if (atlSelectedEvent.transaction_ids?.length && arTidCol) {
-        const idSet = new Set(atlSelectedEvent.transaction_ids)
-        return arRawTx.filter(r => idSet.has(r[arTidCol]))
-      }
-      if (arAggKey) return arRawTx.filter(r => r[arAggKey] === atlSelectedEvent.key)
-      return arRawTx
-    })()
-
-    const toggleTx = col => setAtlTxSort(p =>
-      p.col === col ? { col, dir: p.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
-    const TxSortIcon = ({ col }) => atlTxSort.col !== col
-      ? <span className="opacity-30 ml-1 text-[10px]">⇅</span>
-      : <span className="text-teal-600 ml-1 text-[10px]">{atlTxSort.dir === 'asc' ? '▲' : '▼'}</span>
-    const sortedTx = atlTxSort.col ? [...visibleTx].sort((a, b) => {
-      const av = a[atlTxSort.col] ?? '', bv = b[atlTxSort.col] ?? ''
-      const an = Number(av), bn = Number(bv)
-      const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv))
-      return atlTxSort.dir === 'asc' ? cmp : -cmp
-    }) : visibleTx
-
-    const anchorCluster = res?.tranches.find(t => t.contains_candidate)
-
-    return (
-    <div className="space-y-5">
-      {/* Header card */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="bg-slate-50 border border-slate-200 rounded-xl px-5 py-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">Candidate threshold</p>
-          <p className="text-2xl font-bold tabular-nums text-slate-700">{candidateThreshold != null ? fmtFull(candidateThreshold) : '—'}</p>
-          <p className="text-xs text-slate-400 mt-1">Chosen from simulation</p>
-        </div>
-        <div className={`rounded-xl px-5 py-4 border-2 col-span-2 ${res ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
-          <p className="text-xs font-semibold uppercase tracking-wide text-amber-600 mb-1">Suggested BTL threshold</p>
-          <p className={`text-3xl font-bold tabular-nums ${res ? 'text-amber-700' : 'text-slate-300'}`}>
-            {atlBtlLoading ? <span className="text-xl animate-pulse">Computing k-means…</span> : res ? fmtFull(res.btl_threshold) : '—'}
-          </p>
-          <p className="text-xs text-amber-600 mt-1">
-            {res && anchorCluster
-              ? `Lower bound of cluster ${anchorCluster.rank + 1} of ${res.optimal_k} · elbow method selected k=${res.optimal_k}`
-              : 'Awaiting k-means analysis'}
-          </p>
-        </div>
-      </div>
-
-      {/* Sub-tabs */}
-      <div className="flex items-center gap-0 border-b border-slate-200">
-        {[
-          ['Cluster analysis', 0],
-          [`BTL events (${btlEvents.length})`, 1],
-          ['Full transactions', 2],
-        ].map(([label, idx]) => (
-          <button key={idx} onClick={() => setAtlBtlTab(idx)}
-            className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px
-              ${atlBtlTab === idx ? 'border-teal-600 text-teal-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* ── Tab 0: Cluster Analysis ── */}
-      {atlBtlTab === 0 && (
-        <div className="space-y-4">
-          {atlBtlLoading && (
-            <div className="bg-white border border-slate-200 rounded-xl p-10 text-center">
-              <p className="text-sm text-slate-400 animate-pulse">Running k-means clustering with elbow method…</p>
-            </div>
-          )}
-          {res && (
-            <>
-              {/* Cluster table */}
-              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-                  <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">
-                    K-means clusters — k={res.optimal_k}
-                  </p>
-                  <p className="text-xs text-slate-400">Candidate threshold falls in highlighted cluster → BTL = its lower bound</p>
-                </div>
-                <table className="w-full text-sm">
-                  <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
-                    <tr>
-                      <th className="px-5 py-2 text-left">Cluster</th>
-                      <th className="px-5 py-2 text-right">Low</th>
-                      <th className="px-5 py-2 text-right">High</th>
-                      <th className="px-5 py-2 text-right">Center</th>
-                      <th className="px-5 py-2 text-right">Count</th>
-                      <th className="px-5 py-2 text-right">% of total</th>
-                      <th className="px-5 py-2 text-right">Role</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {res.tranches.map((t, i) => {
-                      const isAnchor = t.contains_candidate
-                      const role = isAnchor ? 'BTL anchor' : t.lo >= res.candidate_threshold ? 'Above candidate' : 'Below BTL'
-                      const roleColor = isAnchor
-                        ? 'text-amber-700 bg-amber-50 border border-amber-200'
-                        : t.lo >= res.candidate_threshold
-                          ? 'text-slate-500 bg-slate-100 border border-slate-200'
-                          : 'text-slate-400 bg-white border border-slate-200'
-                      return (
-                        <tr key={i} className={isAnchor ? 'bg-amber-50/50' : i % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'}>
-                          <td className="px-5 py-2.5 font-medium text-slate-700">Cluster {t.rank + 1}</td>
-                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-600">{fmtFull(t.lo)}</td>
-                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-600">{fmtFull(t.hi)}</td>
-                          <td className="px-5 py-2.5 text-right tabular-nums font-medium text-slate-700">{fmtFull(t.center)}</td>
-                          <td className="px-5 py-2.5 text-right tabular-nums">{t.count.toLocaleString()}</td>
-                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-500">{t.pct}%</td>
-                          <td className="px-5 py-2.5 text-right">
-                            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${roleColor}`}>{role}</span>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Elbow chart + rationale side by side */}
-              <div className="flex gap-4">
-                {res.elbow_data.length > 1 && (
-                  <div className="flex-1 bg-white border border-slate-200 rounded-xl p-5">
-                    <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">
-                      Elbow curve — optimal k={res.optimal_k}
-                    </p>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <ComposedChart data={res.elbow_data} margin={{ left: 10, right: 20, bottom: 10 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                        <XAxis dataKey="k" tick={{ fontSize: 11 }} label={{ value: 'k (clusters)', position: 'insideBottom', offset: -4, fontSize: 10 }} />
-                        <YAxis tick={{ fontSize: 11 }} width={55}
-                          tickFormatter={v => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : v} />
-                        <Tooltip
-                          formatter={(v, name) => name === 'inertia' ? [v.toLocaleString(), 'Inertia'] : [`${v}%`, '% reduction']}
-                          labelFormatter={v => `k = ${v}`} />
-                        <Line type="monotone" dataKey="inertia" stroke="#0d9488" strokeWidth={2} dot={{ fill: '#0d9488', r: 4 }} name="inertia" />
-                        <ReferenceLine x={res.optimal_k} stroke="#f59e0b" strokeDasharray="4 4"
-                          label={{ value: `k=${res.optimal_k}`, fill: '#d97706', fontSize: 11, position: 'top' }} />
-                      </ComposedChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-
-                {/* Rationale */}
-                <div className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-5">
-                  <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-3">Rationale</p>
-                  <pre className="text-xs text-slate-600 whitespace-pre-wrap font-mono leading-relaxed overflow-auto max-h-[220px]">
-                    {res.rationale}
-                  </pre>
-                </div>
-              </div>
-
-              {/* Zone summary — 2 zones only */}
-              <div className="bg-white border border-slate-200 rounded-xl px-5 py-4">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Zone definition</p>
-                <div className="flex gap-4">
-                  {[
-                    ['Below BTL', `< ${fmtFull(res.btl_threshold)}`, 'bg-slate-50 border-slate-200 text-slate-600', 'No enhanced review'],
-                    ['BTL zone', `${fmtFull(res.btl_threshold)} – ${fmtFull(res.candidate_threshold)}`, 'bg-amber-50 border-amber-200 text-amber-700', 'Enhanced monitoring'],
-                  ].map(([zone, range, cls, action]) => (
-                    <div key={zone} className={`flex-1 border rounded-xl p-4 ${cls}`}>
-                      <p className="font-semibold text-sm">{zone}</p>
-                      <p className="text-xs mt-1 font-mono">{range}</p>
-                      <p className="text-xs mt-2 opacity-70">{action}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* ── Tab 1: BTL Events ── */}
-      {atlBtlTab === 1 && (
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-            <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide">
-              BTL events — {fmtFull(res?.btl_threshold ?? 0)} to {fmtFull(res?.candidate_threshold ?? 0)}
-            </p>
-            <p className="text-xs text-slate-400">Click a row to filter transactions</p>
-          </div>
-          {!res ? (
-            <div className="p-8 text-center text-sm text-slate-400">Run the cluster analysis first.</div>
-          ) : (
-            <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
-              <table className="w-full text-xs">
-                <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide sticky top-0 z-10 whitespace-nowrap">
-                  <tr>
-                    <th className="px-4 py-2 text-right w-10">#</th>
-                    <th className="px-4 py-2 text-left">{arAggKey || 'Key'}</th>
-                    <th className="px-4 py-2 text-right whitespace-nowrap">Start date</th>
-                    <th className="px-4 py-2 text-right whitespace-nowrap">End date</th>
-                    <th className="px-4 py-2 text-right">Days</th>
-                    <th className="px-4 py-2 text-right">Sum</th>
-                    <th className="px-4 py-2 text-right">Count</th>
-                    <th className="px-4 py-2 text-left">Transaction IDs</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {btlEvents.map((ev, i) => {
-                    const isSelected = atlSelectedEvent?.key === ev.key && atlSelectedEvent?.date_start === ev.date_start
-                    const tidDisplay = ev.transaction_ids?.slice(0, 3).join(', ') + (ev.transaction_ids?.length > 3 ? ` +${ev.transaction_ids.length - 3} more` : '')
-                    return (
-                      <tr key={i}
-                        onClick={() => { setAtlSelectedEvent(isSelected ? null : ev); setAtlBtlTab(2) }}
-                        className={`cursor-pointer transition-colors ${isSelected ? 'bg-amber-50' : i % 2 === 0 ? 'bg-white hover:bg-slate-50' : 'bg-slate-50/40 hover:bg-slate-100'}`}>
-                        <td className="px-4 py-2 text-right text-slate-400 tabular-nums">{i + 1}</td>
-                        <td className="px-4 py-2 font-medium text-slate-800">{ev.key}</td>
-                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_start || '—'}</td>
-                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums whitespace-nowrap">{ev.date_end || '—'}</td>
-                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.days ?? '—'}</td>
-                        <td className="px-4 py-2 text-right font-semibold text-amber-700 tabular-nums">{fmtCurrency(ev.sum)}</td>
-                        <td className="px-4 py-2 text-right text-slate-600 tabular-nums">{ev.count?.toLocaleString()}</td>
-                        <td className="px-4 py-2 text-slate-400 max-w-xs truncate" title={ev.transaction_ids?.join(', ')}>{tidDisplay}</td>
-                      </tr>
-                    )
-                  })}
-                  {btlEvents.length === 0 && (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-400">No events in the BTL zone.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Tab 2: Full Transactions ── */}
-      {atlBtlTab === 2 && (
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-            <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Full transaction data</p>
-            {atlSelectedEvent ? (
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-                  Filtered: {visibleTx.length} txns for <strong>{atlSelectedEvent.key}</strong>
-                  {atlSelectedEvent.date_start && <span className="ml-1">({atlSelectedEvent.date_start} → {atlSelectedEvent.date_end})</span>}
-                </span>
-                <button onClick={() => setAtlSelectedEvent(null)} className="text-xs text-slate-400 hover:text-red-500">✕ Clear</button>
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400">{arRawTx.length.toLocaleString()} rows (select a BTL event to filter)</p>
-            )}
-          </div>
-          <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
-            <table className="w-full text-xs">
-              <thead className="bg-slate-50 text-slate-500 uppercase tracking-wide sticky top-0 z-10 whitespace-nowrap">
-                <tr>
-                  {arCols.map(c => (
-                    <th key={c} onClick={() => c !== '_row' && toggleTx(c)}
-                      className={`px-3 py-2 text-left select-none ${c !== '_row' ? 'cursor-pointer hover:text-slate-700' : ''}`}>
-                      {c === '_row' ? '#' : c}{c !== '_row' && <TxSortIcon col={c} />}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedTx.map((row, i) => (
-                  <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}>
-                    {arCols.map(c => (
-                      <td key={c} className="px-3 py-2 text-slate-700 whitespace-nowrap">{row[c] ?? '—'}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      <div className="flex justify-between">
-        <button onClick={() => setStep(4)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
-        <button onClick={handleReset}
-          className="px-5 py-2 bg-slate-100 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-200">
-          Start over
-        </button>
-      </div>
-    </div>
-    )
-  }
-
-  const stepRenders = [renderStep0, renderStep1, renderStep2, renderStep3, renderStep4, renderStep5]
+  const stepRenders = [renderStep0, renderStep1, renderStep2, renderStep3, renderStep4]
 
   return (
     <div className="w-full py-10 px-6">
@@ -1823,7 +1706,7 @@ export default function ThresholdSetting() {
         <p className="text-slate-500 text-sm">Calibrate AML monitoring thresholds using historical transaction data and statistical analysis.</p>
       </div>
 
-      <StepIndicator current={step} />
+      <StepIndicator current={step} onStepClick={setStep} />
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-8">
         {stepRenders[step]?.()}

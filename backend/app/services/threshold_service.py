@@ -684,9 +684,29 @@ def suggest_btl_kmeans(series: pd.Series, candidate_threshold: float) -> dict:
             {"k": k, "inertia": round(iner, 0), "pct_reduction": pct_reductions[i]}
             for i, (k, iner) in enumerate(zip(ks, inertias))
         ],
-        "rationale": "
-".join(lines),
+        "rationale": "\n".join(lines),
     }
+
+
+# ── Percentile curve (P50–P100 alert counts) ───────────────────────────────────
+
+def compute_percentile_curve(series: pd.Series, pct_from: int = 50, pct_to: int = 100) -> list[dict]:
+    """
+    Return expected alert count at every integer percentile from pct_from to pct_to.
+    Uses a single sort + searchsorted pass — O(n log n), sub-millisecond for typical datasets.
+    """
+    arr = pd.to_numeric(series, errors="coerce").dropna().values
+    if len(arr) == 0:
+        return []
+    pcts = list(range(pct_from, pct_to + 1))
+    thresholds = np.percentile(arr, pcts)
+    arr_sorted = np.sort(arr)
+    total = len(arr_sorted)
+    points = []
+    for pct, thresh in zip(pcts, thresholds):
+        alerts = int(total - np.searchsorted(arr_sorted, thresh, side="left"))
+        points.append({"pct": pct, "threshold": float(thresh), "alerts": alerts})
+    return points
 
 
 # ── AI scenario generation ─────────────────────────────────────────────────────

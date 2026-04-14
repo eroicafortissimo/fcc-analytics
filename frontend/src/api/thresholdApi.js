@@ -39,6 +39,9 @@ export const thresholdApi = {
   // ATL/BTL
   computeAtlBtl: (body) => axios.post(`${BASE}/analysis/atl-btl`, body),
 
+  // Structuring matrix
+  structuringMatrix: (body) => axios.post(`${BASE}/analysis/structuring-matrix`, body),
+
   // Report
   generateReport: (analysis_id) => axios.post(`${BASE}/report/generate`, { analysis_id }),
 }

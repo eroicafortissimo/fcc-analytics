@@ -60,6 +60,15 @@ class AnalysisRequest(BaseModel):
     parameter_column: str = ""
     boundaries: Optional[list[float]] = None
 
+class StructuringMatrixRequest(BaseModel):
+    dataset_id: int
+    filter_rules: dict = {}
+    amount_column: str
+    entity_column: str
+    cap: float = 10000.0
+    amount_thresholds: list[float] = [3000, 4000, 5000, 6000, 7000, 8000, 9000]
+    count_thresholds: list[int] = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+
 class SimulateRequest(BaseModel):
     dataset_id: int
     analysis_id: Optional[int] = None
@@ -671,6 +680,29 @@ async def percentile_curve(body: AnalysisRequest, db: aiosqlite.Connection = Dep
         series = raw_df[col]
 
     return svc.compute_percentile_curve(series)
+
+
+# ── Structuring matrix ─────────────────────────────────────────────────────────
+
+@router.post("/analysis/structuring-matrix")
+async def structuring_matrix(body: StructuringMatrixRequest, db: aiosqlite.Connection = Depends(get_db)):
+    """2-parameter structuring rule tuner: returns entity counts for every (min_amount, min_count) cell."""
+    mem = await _get_mem(body.dataset_id, db)
+    df = svc.apply_filters(mem["df"], body.filter_rules)
+    if len(df) == 0:
+        raise HTTPException(status_code=400, detail="No rows match the current filters")
+    if not body.amount_column or body.amount_column not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Amount column '{body.amount_column}' not found")
+    if not body.entity_column or body.entity_column not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Entity column '{body.entity_column}' not found")
+    return svc.compute_structuring_matrix(
+        df,
+        amount_col=body.amount_column,
+        entity_col=body.entity_column,
+        cap=body.cap,
+        amount_thresholds=body.amount_thresholds,
+        count_thresholds=body.count_thresholds,
+    )
 
 
 # ── ATL/BTL analysis ───────────────────────────────────────────────────────────

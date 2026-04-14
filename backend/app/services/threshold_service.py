@@ -511,6 +511,71 @@ def simulate_thresholds(
     return results
 
 
+def compute_structuring_matrix(
+    df: pd.DataFrame,
+    amount_col: str,
+    entity_col: str,
+    cap: float = 10000.0,
+    amount_thresholds: list | None = None,
+    count_thresholds: list | None = None,
+) -> dict:
+    """
+    2-parameter structuring rule tuner.
+
+    For every (min_amount, min_count) combination, counts entities where:
+      - No single transaction >= cap (entity never crossed the reporting threshold)
+      - At least min_count transactions each >= min_amount
+    """
+    if amount_thresholds is None:
+        amount_thresholds = [3000, 4000, 5000, 6000, 7000, 8000, 9000]
+    if count_thresholds is None:
+        count_thresholds = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    df = df[[entity_col, amount_col]].copy()
+    df["_amt"] = pd.to_numeric(df[amount_col], errors="coerce")
+    df = df.dropna(subset=["_amt"])
+    df = df[df[entity_col].notna() & (df[entity_col] != "")]
+
+    total_entities = int(df[entity_col].nunique())
+
+    if total_entities == 0:
+        return {
+            "rows": [],
+            "amount_thresholds": [float(a) for a in sorted(amount_thresholds)],
+            "count_thresholds": list(count_thresholds),
+            "cap": float(cap),
+            "total_entities": 0,
+            "clean_entities": 0,
+        }
+
+    # Entities that NEVER hit or exceeded the cap
+    entity_max = df.groupby(entity_col)["_amt"].max()
+    clean_ids = entity_max[entity_max < cap].index
+    df_clean = df[df[entity_col].isin(clean_ids)]
+    clean_entities = int(len(clean_ids))
+
+    rows = []
+    for min_amt in sorted(amount_thresholds):
+        qualifying = (
+            df_clean[df_clean["_amt"] >= min_amt]
+            .groupby(entity_col)
+            .size()
+        )
+        counts = {}
+        for min_cnt in count_thresholds:
+            counts[str(int(min_cnt))] = int((qualifying >= min_cnt).sum())
+        rows.append({"amount_threshold": float(min_amt), "counts": counts})
+
+    return {
+        "rows": rows,
+        "amount_thresholds": [float(a) for a in sorted(amount_thresholds)],
+        "count_thresholds": [int(c) for c in count_thresholds],
+        "cap": float(cap),
+        "total_entities": total_entities,
+        "clean_entities": clean_entities,
+    }
+
+
 def recommend_threshold(
     sim_results: list[dict],
     target_monthly_alerts: int | None = None,

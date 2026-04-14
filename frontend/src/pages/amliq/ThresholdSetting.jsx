@@ -107,6 +107,25 @@ export default function ThresholdSetting() {
   const [aggFunction, setAggFunction] = useState('SUM')
   const [paramColumn, setParamColumn] = useState('')
 
+  // Structuring analysis config
+  const [structCap, setStructCap] = useState('10000')
+  const [structAmtFrom, setStructAmtFrom] = useState('3000')
+  const [structAmtTo, setStructAmtTo] = useState('9000')
+  const [structAmtStep, setStructAmtStep] = useState('1000')
+  const [structCntFrom, setStructCntFrom] = useState('2')
+  const [structCntTo, setStructCntTo] = useState('10')
+  const [structuringResult, setStructuringResult] = useState(null)
+
+  // Tunable params (up to 2) — defined in Scenario step Manual mode
+  const [tunableParams, setTunableParams] = useState([])
+  // Each: { id, label, column, sweep_from, sweep_to, sweep_step }
+  const [scopeMode, setScopeMode] = useState('single')
+  const [scopeEntityCol, setScopeEntityCol] = useState('')
+  const [scopePeriod, setScopePeriod] = useState('rolling_30')
+  // Multi-param result state
+  const [param1CurveData, setParam1CurveData] = useState(null)
+  const [twoParamTab, setTwoParamTab] = useState(0)
+
   // Analysis context (persisted for simulate / auto-thresholds)
   const [analysisContext, setAnalysisContext] = useState(null)
 
@@ -143,6 +162,29 @@ export default function ThresholdSetting() {
   useEffect(() => {
     thresholdApi.listDatasets().then(r => setDatasets(r.data)).catch(() => {})
   }, [])
+
+  // Fetch preview rows when dataset is selected — used for unique column value chips
+  const [previewRows, setPreviewRows] = useState([])
+  useEffect(() => {
+    if (!selectedDataset?.id) { setPreviewRows([]); return }
+    thresholdApi.previewDataset(selectedDataset.id, 200)
+      .then(r => setPreviewRows(r.data?.rows || []))
+      .catch(() => setPreviewRows([]))
+  }, [selectedDataset?.id])
+
+  const getColVals = (col) => {
+    if (!col || !previewRows.length) return []
+    const seen = new Set()
+    const vals = []
+    for (const row of previewRows) {
+      const v = row[col]
+      if (v != null && v !== '' && !seen.has(v)) {
+        seen.add(v); vals.push(String(v))
+        if (vals.length >= 10) break
+      }
+    }
+    return vals
+  }
 
   // Restore simulation state when returning from BTL module
   useEffect(() => {
@@ -236,6 +278,21 @@ export default function ThresholdSetting() {
     }
   }
 
+  const addTunableParam = () => {
+    if (tunableParams.length >= 2) return
+    const idx = tunableParams.length
+    setTunableParams(prev => [...prev, {
+      id: Date.now(),
+      label: idx === 0 ? 'Min Amount' : 'Min Count',
+      column: '',
+      sweep_from: idx === 0 ? '3000' : '2',
+      sweep_to: idx === 0 ? '9000' : '10',
+      sweep_step: idx === 0 ? '1000' : '1',
+    }])
+  }
+  const removeTunableParam = (id) => setTunableParams(prev => prev.filter(p => p.id !== id))
+  const updateTunableParam = (id, key, val) => setTunableParams(prev => prev.map(p => p.id === id ? { ...p, [key]: val } : p))
+
   const handleAiScenario = async () => {
     if (!aiPrompt.trim() || !selectedDataset) return
     setAiLoading(true)
@@ -303,7 +360,150 @@ export default function ThresholdSetting() {
   }
 
   const handleRunAnalysis = async () => {
-    if (!selectedDataset || !paramColumn) return
+    if (!selectedDataset) return
+
+    // ── Tunable params pathway ─────────────────────────────────────────────
+    if (tunableParams.length > 0) {
+      const p1 = tunableParams[0]
+      if (!p1.column) { alert('Select a column for Parameter 1.'); return }
+      const rules = scenarioMode === 'manual' ? simpleFiltersToRules() : filterRules
+      const body = {
+        dataset_id: selectedDataset.id,
+        filter_rules: rules,
+        analysis_type: scopeMode,
+        parameter_column: p1.column,
+        aggregation_key: scopeMode === 'aggregate' ? scopeEntityCol : '',
+        aggregation_amount: scopeMode === 'aggregate' ? p1.column : '',
+        aggregation_date: aggDate,
+        aggregation_period: scopePeriod,
+        aggregation_function: 'SUM',
+      }
+      setAnalysisContext(body)
+      setAnalysisLoading(true)
+      try {
+        if (tunableParams.length === 1) {
+          // 1 param: run analysis + percentile curve → jump to Simulate (Step 4)
+          const [ar, cr] = await Promise.all([
+            thresholdApi.runAnalysis(body),
+            thresholdApi.percentileCurve(body),
+          ])
+          const d = ar.data
+          setAnalysisResult({
+            stats: d.statistics || {},
+            tranches: d.tranches || [],
+            cdf: (d.tranches || []).map((t, i) => ({ value: t.hi, label: t.label, all_pct: t.cumulative_pct, trim_pct: (d.trim_tranches || [])[i]?.cumulative_pct ?? null })),
+            categorical: d.categorical_dist?.rows || [],
+            matched_rows: d.matched_rows,
+            original_rows: d.original_rows,
+            column: d.column,
+            is_categorical: d.is_categorical,
+            sample_values: d.sample_values || [],
+            events: d.events || [],
+            raw_transactions: d.raw_transactions || [],
+            raw_columns: d.raw_columns || [],
+            agg_key_col: d.agg_key_col || null,
+            analysis_type: d.analysis_type || scopeMode,
+            tid_col: d.tid_col || null,
+          })
+          setSimCurveData(cr.data || [])
+          setAnalysisId(d.analysis_id)
+          setStep(4)
+        } else {
+          // 2 params: run analysis + percentile curve for p1 + structuring matrix
+          const p2 = tunableParams[1]
+          if (!p2.column && scopeMode !== 'aggregate') { alert('Select a column for Parameter 2.'); setAnalysisLoading(false); return }
+          if (!scopeEntityCol && scopeMode === 'aggregate') { alert('Select an entity column in Transaction Scope.'); setAnalysisLoading(false); return }
+          const amtFrom = parseFloat(p1.sweep_from) || 3000
+          const amtTo   = parseFloat(p1.sweep_to)   || 9000
+          const amtStep = parseFloat(p1.sweep_step)  || 1000
+          const cntFrom = parseInt(p2.sweep_from)    || 2
+          const cntTo   = parseInt(p2.sweep_to)      || 10
+          const amount_thresholds = []
+          for (let a = amtFrom; a <= amtTo + 0.001; a += amtStep) amount_thresholds.push(Math.round(a))
+          const count_thresholds = []
+          for (let c = cntFrom; c <= cntTo; c++) count_thresholds.push(c)
+          const [ar, cr, mr] = await Promise.all([
+            thresholdApi.runAnalysis(body),
+            thresholdApi.percentileCurve(body),
+            thresholdApi.structuringMatrix({
+              dataset_id: selectedDataset.id,
+              filter_rules: rules,
+              amount_column: p1.column,
+              entity_column: scopeEntityCol,
+              cap: parseFloat(structCap) || 10000,
+              amount_thresholds,
+              count_thresholds,
+            }),
+          ])
+          const d = ar.data
+          setAnalysisResult({
+            stats: d.statistics || {},
+            tranches: d.tranches || [],
+            cdf: (d.tranches || []).map((t, i) => ({ value: t.hi, label: t.label, all_pct: t.cumulative_pct, trim_pct: (d.trim_tranches || [])[i]?.cumulative_pct ?? null })),
+            categorical: d.categorical_dist?.rows || [],
+            matched_rows: d.matched_rows,
+            original_rows: d.original_rows,
+            column: d.column,
+            is_categorical: d.is_categorical,
+            sample_values: d.sample_values || [],
+            events: d.events || [],
+            raw_transactions: d.raw_transactions || [],
+            raw_columns: d.raw_columns || [],
+            agg_key_col: d.agg_key_col || null,
+            analysis_type: d.analysis_type || scopeMode,
+            tid_col: d.tid_col || null,
+          })
+          setParam1CurveData(cr.data || [])
+          setStructuringResult(mr.data)
+          setAnalysisId(d.analysis_id)
+          setTwoParamTab(0)
+          setStep(3)
+        }
+      } catch (err) {
+        alert(err?.response?.data?.detail || 'Analysis failed')
+      } finally {
+        setAnalysisLoading(false)
+      }
+      return
+    }
+
+    // ── Structuring matrix mode ─────────────────────────────────────────────
+    if (analysisType === 'structuring') {
+      if (!aggKey || !aggAmount) return
+      const cap = parseFloat(structCap) || 10000
+      const amtFrom = parseFloat(structAmtFrom) || 3000
+      const amtTo   = parseFloat(structAmtTo)   || 9000
+      const amtStep = parseFloat(structAmtStep) || 1000
+      const cntFrom = parseInt(structCntFrom)   || 2
+      const cntTo   = parseInt(structCntTo)     || 10
+      const amount_thresholds = []
+      for (let a = amtFrom; a <= amtTo + 0.001; a += amtStep) amount_thresholds.push(Math.round(a))
+      const count_thresholds = []
+      for (let c = cntFrom; c <= cntTo; c++) count_thresholds.push(c)
+      const rules = scenarioMode === 'manual' ? simpleFiltersToRules() : filterRules
+      setAnalysisLoading(true)
+      try {
+        const r = await thresholdApi.structuringMatrix({
+          dataset_id: selectedDataset.id,
+          filter_rules: rules,
+          amount_column: aggAmount,
+          entity_column: aggKey,
+          cap,
+          amount_thresholds,
+          count_thresholds,
+        })
+        setStructuringResult(r.data)
+        setStep(3)
+      } catch (err) {
+        alert(err?.response?.data?.detail || 'Structuring analysis failed')
+      } finally {
+        setAnalysisLoading(false)
+      }
+      return
+    }
+
+    // ── Standard / aggregate mode ───────────────────────────────────────────
+    if (!paramColumn) return
     setAnalysisLoading(true)
     try {
       const body = buildAnalysisBody()
@@ -585,37 +785,161 @@ export default function ThresholdSetting() {
       )}
 
       {scenarioMode === 'manual' && (
-        <div className="space-y-3">
-          <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Filter conditions</h3>
-          {simpleFilters.map((f, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <div className="w-14 text-xs text-center text-slate-400 shrink-0">
-                {i === 0 ? 'WHERE' : (
-                  <select value={f.logic} onChange={e => updateFilter(i, 'logic', e.target.value)}
-                    className="text-xs border border-slate-200 rounded px-1 py-1 bg-white w-14">
-                    <option>AND</option>
-                    <option>OR</option>
+        <div className="space-y-5">
+
+          {/* ── Transaction Scope ── */}
+          <div className="border border-slate-200 rounded-xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Transaction Scope</p>
+            <div className="flex gap-3">
+              {[['single','Per-transaction','Flag individual transactions'],['aggregate','Aggregated','Roll up by entity over a review period']].map(([k,label,desc]) => (
+                <div key={k} onClick={() => setScopeMode(k)}
+                  className={`flex-1 border rounded-lg p-3 cursor-pointer text-sm transition-colors
+                    ${scopeMode === k ? 'border-teal-500 bg-teal-50' : 'border-slate-200 hover:border-teal-300'}`}>
+                  <p className="font-medium text-slate-800">{label}</p>
+                  <p className="text-xs text-slate-500 mt-0.5">{desc}</p>
+                </div>
+              ))}
+            </div>
+            {scopeMode === 'aggregate' && (
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Entity column</label>
+                  <select value={scopeEntityCol} onChange={e => setScopeEntityCol(e.target.value)}
+                    className="w-full text-xs border border-slate-200 rounded-lg px-2.5 py-2 bg-white">
+                    <option value="">-- select --</option>
+                    {columns.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Review period</label>
+                  <select value={scopePeriod} onChange={e => setScopePeriod(e.target.value)}
+                    className="w-full text-xs border border-slate-200 rounded-lg px-2.5 py-2 bg-white">
+                    <option value="rolling_7">7-day rolling</option>
+                    <option value="rolling_30">30-day rolling</option>
+                    <option value="rolling_90">90-day rolling</option>
+                    <option value="none">Lifetime (no window)</option>
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ── Non-tunable Parameters (Fixed Filters) ── */}
+          <div className="border border-slate-200 rounded-xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Non-tunable Parameters <span className="text-slate-400 font-normal normal-case">(always applied)</span></p>
+            {simpleFilters.map((f, i) => (
+              <div key={i} className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-14 text-xs text-center text-slate-400 shrink-0">
+                    {i === 0 ? 'WHERE' : (
+                      <select value={f.logic} onChange={e => updateFilter(i, 'logic', e.target.value)}
+                        className="text-xs border border-slate-200 rounded px-1 py-1 bg-white w-14">
+                        <option>AND</option>
+                        <option>OR</option>
+                      </select>
+                    )}
+                  </div>
+                  <select value={f.column} onChange={e => updateFilter(i, 'column', e.target.value)}
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5 bg-white flex-1 min-w-0">
+                    <option value="">-- column --</option>
+                    {columns.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <select value={f.operator} onChange={e => updateFilter(i, 'operator', e.target.value)}
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5 bg-white w-24">
+                    {['=','!=','>','>=','<','<=','contains','in'].map(op => <option key={op} value={op}>{op}</option>)}
+                  </select>
+                  <input value={f.value} onChange={e => updateFilter(i, 'value', e.target.value)}
+                    placeholder="type a value…"
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5 flex-1 min-w-0" />
+                  <button onClick={() => removeFilter(i)} className="text-slate-300 hover:text-red-400 text-sm shrink-0">✕</button>
+                </div>
+                {/* Unique value chips from preview data */}
+                {f.column && getColVals(f.column).length > 0 && (
+                  <div className="flex flex-wrap gap-1 pl-16">
+                    {getColVals(f.column).map(v => (
+                      <button key={v} onClick={() => updateFilter(i, 'value', v)}
+                        className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors whitespace-nowrap
+                          ${f.value === v
+                            ? 'bg-teal-600 text-white border-teal-600'
+                            : 'border-slate-200 text-slate-500 hover:border-teal-300 hover:text-teal-700 bg-white'}`}>
+                        {v}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
-              <select value={f.column} onChange={e => updateFilter(i, 'column', e.target.value)}
-                className="text-xs border border-slate-200 rounded px-2 py-1.5 bg-white flex-1 min-w-0">
-                <option value="">-- column --</option>
-                {columns.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <select value={f.operator} onChange={e => updateFilter(i, 'operator', e.target.value)}
-                className="text-xs border border-slate-200 rounded px-2 py-1.5 bg-white w-24">
-                {['=','!=','>','>=','<','<=','contains','in'].map(op => <option key={op} value={op}>{op}</option>)}
-              </select>
-              <input value={f.value} onChange={e => updateFilter(i, 'value', e.target.value)}
-                placeholder="value"
-                className="text-xs border border-slate-200 rounded px-2 py-1.5 flex-1 min-w-0" />
-              <button onClick={() => removeFilter(i)} className="text-slate-300 hover:text-red-400 text-sm shrink-0">✕</button>
+            ))}
+            <div className="flex gap-3 pt-1">
+              <button onClick={addFilter} className="text-xs text-teal-600 hover:text-teal-700 font-medium">+ Add condition</button>
+              <button onClick={handleSaveScenario} className="text-xs text-slate-600 font-medium border border-slate-200 rounded px-3 py-1 hover:bg-slate-50">Save scenario</button>
             </div>
-          ))}
-          <div className="flex gap-3 pt-1">
-            <button onClick={addFilter} className="text-xs text-teal-600 hover:text-teal-700 font-medium">+ Add condition</button>
-            <button onClick={handleSaveScenario} className="text-xs text-slate-600 font-medium border border-slate-200 rounded px-3 py-1 hover:bg-slate-50">Save scenario</button>
+          </div>
+
+          {/* ── Tunable Parameters ── */}
+          <div className="border border-slate-200 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Tunable Parameters</p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {tunableParams.length === 0 && 'None — runs standard threshold analysis'}
+                  {tunableParams.length === 1 && '1 parameter → single-axis sensitivity charts'}
+                  {tunableParams.length === 2 && '2 parameters → per-param charts + 2D matrix'}
+                </p>
+              </div>
+              {tunableParams.length < 2 && (
+                <button onClick={addTunableParam}
+                  className="text-xs text-teal-700 font-medium border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-50">
+                  + Add parameter
+                </button>
+              )}
+            </div>
+
+            {tunableParams.map((p, pi) => (
+              <div key={p.id} className="space-y-2 border border-teal-100 rounded-xl bg-teal-50/30 p-3">
+                {/* Row 1: label + column + operator + sweep range */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-teal-600 uppercase tracking-wide w-14 shrink-0 text-center">
+                    P{pi + 1}
+                  </span>
+                  <input value={p.label} onChange={e => updateTunableParam(p.id, 'label', e.target.value)}
+                    placeholder="Label (e.g. Min Amount)"
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5 w-36 bg-white" />
+                  <select value={p.column} onChange={e => updateTunableParam(p.id, 'column', e.target.value)}
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5 bg-white flex-1 min-w-0">
+                    <option value="">-- column --</option>
+                    {columns.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <select value={p.operator || '>='} onChange={e => updateTunableParam(p.id, 'operator', e.target.value)}
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5 bg-white w-16">
+                    {['>=','>','<=','<','=','!='].map(op => <option key={op}>{op}</option>)}
+                  </select>
+                  <input value={p.value || ''} onChange={e => updateTunableParam(p.id, 'value', e.target.value)}
+                    placeholder="value"
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5 flex-1 min-w-0 bg-white" />
+                  <button onClick={() => removeTunableParam(p.id)} className="text-slate-300 hover:text-red-400 text-sm shrink-0">✕</button>
+                </div>
+                {/* Value chips for selected column */}
+                {p.column && getColVals(p.column).length > 0 && (
+                  <div className="flex flex-wrap gap-1 pl-16">
+                    {getColVals(p.column).map(v => (
+                      <button key={v} onClick={() => updateTunableParam(p.id, 'value', v)}
+                        className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors whitespace-nowrap
+                          ${p.value === v
+                            ? 'bg-teal-600 text-white border-teal-600'
+                            : 'border-slate-200 text-slate-500 hover:border-teal-300 hover:text-teal-700 bg-white'}`}>
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {tunableParams.length === 0 && (
+              <div className="text-center py-4 text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl">
+                Add a parameter to enable sensitivity analysis
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -665,6 +989,7 @@ export default function ThresholdSetting() {
           {[
             ['single', 'Per-transaction', 'Flag individual transactions above the threshold'],
             ['aggregate', 'Aggregated', 'Sum transactions per entity/account, then flag entities whose total exceeds the threshold'],
+            ['structuring', 'Structuring Analysis', 'Two-parameter matrix: count entities with ≥N transactions of ≥$X, with no transactions above the cap'],
           ].map(([k, label, desc]) => (
             <div key={k} onClick={() => setAnalysisType(k)}
               className={`flex-1 border rounded-xl p-4 cursor-pointer transition-colors
@@ -734,10 +1059,75 @@ export default function ThresholdSetting() {
         </div>
       )}
 
+      {analysisType === 'structuring' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Entity column <span className="text-slate-400 font-normal">(group by)</span></label>
+              <select value={aggKey} onChange={e => setAggKey(e.target.value)}
+                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
+                <option value="">-- select --</option>
+                {columns.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Amount column</label>
+              <select value={aggAmount} onChange={e => setAggAmount(e.target.value)}
+                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
+                <option value="">-- select --</option>
+                {columns.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Cap (exclude entities with any transaction ≥ this)</label>
+            <input type="number" value={structCap} onChange={e => setStructCap(e.target.value)} min={0}
+              className="w-48 text-sm border border-slate-200 rounded-lg px-3 py-2" />
+            <span className="text-xs text-slate-400 ml-2">Default: $10,000</span>
+          </div>
+          <div className="border border-slate-100 rounded-xl p-4 bg-slate-50 space-y-3">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Amount axis (row dimension)</p>
+            <div className="flex items-center gap-3 flex-wrap">
+              <div>
+                <label className="block text-[10px] text-slate-500 mb-1">From ($)</label>
+                <input type="number" value={structAmtFrom} onChange={e => setStructAmtFrom(e.target.value)} min={0}
+                  className="w-28 text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white" />
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-500 mb-1">To ($)</label>
+                <input type="number" value={structAmtTo} onChange={e => setStructAmtTo(e.target.value)} min={0}
+                  className="w-28 text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white" />
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-500 mb-1">Step ($)</label>
+                <input type="number" value={structAmtStep} onChange={e => setStructAmtStep(e.target.value)} min={100}
+                  className="w-28 text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white" />
+              </div>
+            </div>
+          </div>
+          <div className="border border-slate-100 rounded-xl p-4 bg-slate-50 space-y-3">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Count axis (column dimension)</p>
+            <div className="flex items-center gap-3">
+              <div>
+                <label className="block text-[10px] text-slate-500 mb-1">From</label>
+                <input type="number" value={structCntFrom} onChange={e => setStructCntFrom(e.target.value)} min={1}
+                  className="w-24 text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white" />
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-500 mb-1">To</label>
+                <input type="number" value={structCntTo} onChange={e => setStructCntTo(e.target.value)} min={1}
+                  className="w-24 text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white" />
+              </div>
+              <p className="text-xs text-slate-400 mt-4">Each cell = entities with ≥N transactions in [min_amt, cap)</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex justify-between">
         <button onClick={() => setStep(1)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
         <button onClick={handleRunAnalysis}
-          disabled={analysisLoading || (analysisType === 'aggregate' ? !aggKey || !aggAmount : !paramColumn)}
+          disabled={analysisLoading || (['aggregate','structuring'].includes(analysisType) ? !aggKey || !aggAmount : !paramColumn)}
           className="px-5 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 disabled:opacity-40">
           {analysisLoading ? 'Analyzing…' : 'Run Analysis →'}
         </button>
@@ -760,7 +1150,326 @@ export default function ThresholdSetting() {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n)
   }
 
+  // ── Reusable sensitivity charts (P50–P100 expected alerts + delta) ─────────
+  const renderSensitivityCharts = (curveData, refThresholds = []) => {
+    const lineData = (curveData || []).slice().reverse().map(pt => ({
+      pct: pt.pct, alerts: pt.alerts, threshold: pt.threshold,
+    }))
+    const deltaData = lineData.slice(0, -1).map((pt, i) => ({
+      pct: pt.pct, drop: lineData[i + 1].alerts - pt.alerts,
+    }))
+    const deltaRows = [...deltaData, { pct: 50, drop: null }]
+    const yFmt = v => v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(v)
+    if (lineData.length < 2) return null
+    const heatCell = (t) => ({ background: `rgba(251,191,36,${(t * 0.72).toFixed(2)})`, color: t > 0.55 ? '#92400e' : '#475569', fontWeight: t > 0.7 ? '600' : '400' })
+    const heatCellRed = (t) => ({ background: `rgba(239,68,68,${(t * 0.68).toFixed(2)})`, color: t > 0.55 ? '#7f1d1d' : '#475569', fontWeight: t > 0.7 ? '600' : '400' })
+    const alertMin = Math.min(...lineData.map(d => d.alerts))
+    const alertMax = Math.max(...lineData.map(d => d.alerts))
+    const alertT = v => alertMax === alertMin ? 0 : (v - alertMin) / (alertMax - alertMin)
+    const dropVals = deltaData.map(d => d.drop)
+    const dropMin = Math.min(...dropVals)
+    const dropMax = Math.max(...dropVals)
+    const dropT = v => dropMax === dropMin ? 0 : (v - dropMin) / (dropMax - dropMin)
+    return (
+      <div className="space-y-4">
+        <div className="bg-white border border-slate-200 rounded-xl pt-5 px-5 pb-3">
+          <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Expected alerts by threshold (P100–P50)</p>
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart syncId="sim-curve" data={lineData} margin={{ left: 10, right: 24, bottom: 18 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+              <XAxis dataKey="pct" type="number" domain={[100, 50]} reversed tick={{ fontSize: 11 }}
+                tickFormatter={v => `P${v}`}
+                label={{ value: 'Percentile', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#94a3b8' }} />
+              <YAxis tick={{ fontSize: 11 }} width={50} tickFormatter={yFmt} />
+              <Tooltip content={({ active, payload }) => {
+                if (!active || !payload?.length) return null
+                const d = payload[0].payload
+                return (
+                  <div className="bg-white border border-slate-200 rounded-lg shadow-sm px-3 py-2 text-xs">
+                    <p className="font-semibold text-slate-700 mb-1">P{d.pct}</p>
+                    <p className="text-teal-700">{d.alerts.toLocaleString()} alerts</p>
+                    <p className="text-slate-400">{fmtFull(d.threshold)}</p>
+                  </div>
+                )
+              }} />
+              <Line type="monotone" dataKey="alerts" stroke="#0d9488" strokeWidth={2} dot={false} />
+              {refThresholds.map((r, ri) => {
+                const pct = r.events_pct != null ? Math.round((100 - r.events_pct) * 10) / 10 : null
+                return pct != null && pct >= 50 ? (
+                  <ReferenceLine key={ri} x={pct} stroke="#f59e0b" strokeDasharray="4 3"
+                    label={{ value: fmtCurrency(r.threshold), fill: '#d97706', fontSize: 10, position: 'insideTopRight' }} />
+                ) : null
+              })}
+            </LineChart>
+          </ResponsiveContainer>
+          <div className="mt-2" style={{ paddingLeft: 60, paddingRight: 24 }}>
+            <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
+              <thead><tr>{lineData.map(d => (
+                <th key={d.pct} className="text-center border border-slate-100 py-0.5" style={{ fontSize: 9, color: '#94a3b8', fontWeight: 500 }}>P{d.pct}</th>
+              ))}</tr></thead>
+              <tbody><tr>{lineData.map(d => (
+                <td key={d.pct} className="text-center border border-slate-100 py-1" style={{ ...heatCell(alertT(d.alerts)), fontSize: 9 }} title={`P${d.pct}: ${d.alerts.toLocaleString()} alerts`}>
+                  {yFmt(d.alerts)}
+                </td>
+              ))}</tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl pt-5 px-5 pb-3">
+          <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-1">Change in alerts per percentile step</p>
+          <p className="text-xs text-slate-400 mb-4">Alerts gained by lowering the threshold one step</p>
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart syncId="sim-curve" data={deltaData} margin={{ left: 10, right: 24, bottom: 18 }}>
+              <defs>
+                <linearGradient id="dropGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#0d9488" stopOpacity={0.25} />
+                  <stop offset="95%" stopColor="#0d9488" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+              <XAxis dataKey="pct" type="number" domain={[100, 50]} reversed tick={{ fontSize: 11 }}
+                tickFormatter={v => `P${v}`}
+                label={{ value: 'Percentile', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#94a3b8' }} />
+              <YAxis tick={{ fontSize: 11 }} width={50} tickFormatter={yFmt} />
+              <Tooltip formatter={v => [v.toLocaleString(), 'Alerts at this step']} labelFormatter={v => `P${v}`} />
+              <Area type="monotone" dataKey="drop" stroke="#0d9488" strokeWidth={1.5} fill="url(#dropGrad)" />
+              {refThresholds.map((r, ri) => {
+                const pct = r.events_pct != null ? Math.round((100 - r.events_pct) * 10) / 10 : null
+                return pct != null && pct >= 50 ? (
+                  <ReferenceLine key={ri} x={pct} stroke="#f59e0b" strokeDasharray="4 3" />
+                ) : null
+              })}
+            </AreaChart>
+          </ResponsiveContainer>
+          <div className="mt-2" style={{ paddingLeft: 60, paddingRight: 24 }}>
+            <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
+              <thead><tr>{lineData.map(d => (
+                <th key={d.pct} className="text-center border border-slate-100 py-0.5" style={{ fontSize: 9, color: '#94a3b8', fontWeight: 500 }}>P{d.pct}</th>
+              ))}</tr></thead>
+              <tbody><tr>{deltaRows.map(d => (
+                <td key={d.pct} className="text-center border border-slate-100 py-1"
+                  style={d.drop != null ? { ...heatCellRed(dropT(d.drop)), fontSize: 9 } : { fontSize: 9, color: '#94a3b8' }}>
+                  {d.drop != null ? yFmt(d.drop) : '—'}
+                </td>
+              ))}</tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const renderStep3 = () => {
+    // ── Structuring matrix result ───────────────────────────────────────────
+    if (analysisType === 'structuring' && structuringResult) {
+      const { rows, amount_thresholds, count_thresholds, cap, total_entities, clean_entities } = structuringResult
+      // Flatten all cell values to compute heat-map range
+      const allVals = rows.flatMap(r => count_thresholds.map(c => r.counts[String(c)] ?? 0))
+      const maxVal = Math.max(...allVals, 1)
+      const heatCell = (v) => {
+        const t = v / maxVal
+        return {
+          background: `rgba(251,191,36,${(t * 0.8).toFixed(2)})`,
+          color: t > 0.6 ? '#92400e' : '#475569',
+          fontWeight: t > 0.7 ? '600' : '400',
+        }
+      }
+      return (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800">Structuring Detection Matrix</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {clean_entities?.toLocaleString()} entities with no transaction ≥ {fmtCurrency(cap)} (of {total_entities?.toLocaleString()} total)
+              </p>
+            </div>
+            <div className="text-xs text-slate-400 text-right">
+              <p>Rows: minimum transaction amount</p>
+              <p>Columns: minimum transaction count</p>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="text-xs border-collapse w-full">
+              <thead>
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-500 font-semibold border border-slate-200 bg-slate-50 whitespace-nowrap">
+                    Min Amount ↓<br /><span className="font-normal text-[10px]">Min Count →</span>
+                  </th>
+                  {count_thresholds.map(c => (
+                    <th key={c} className="px-3 py-2 text-center text-slate-600 font-semibold border border-slate-200 bg-slate-50 whitespace-nowrap">
+                      ≥{c} txns
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri}>
+                    <td className="px-3 py-2 font-semibold text-slate-700 border border-slate-200 bg-slate-50 whitespace-nowrap">
+                      ≥{fmtCurrency(row.amount_threshold)}
+                    </td>
+                    {count_thresholds.map(c => {
+                      const v = row.counts[String(c)] ?? 0
+                      return (
+                        <td key={c} className="px-3 py-2.5 text-center border border-slate-200 font-medium tabular-nums"
+                          style={heatCell(v)}>
+                          {v.toLocaleString()}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center gap-3 text-[10px] text-slate-400">
+            <span>Heat intensity: higher entity count</span>
+            <div className="flex items-center gap-1">
+              {[0.1, 0.3, 0.5, 0.7, 0.9].map(t => (
+                <div key={t} className="w-5 h-3 rounded-sm border border-slate-200"
+                  style={{ background: `rgba(251,191,36,${(t * 0.8).toFixed(2)})` }} />
+              ))}
+              <span className="ml-1">→ more entities flagged</span>
+            </div>
+          </div>
+
+          <div className="flex justify-between">
+            <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
+            <button onClick={() => setStep(2)}
+              className="px-5 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700">
+              Adjust Parameters →
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    // ── 2-param analysis: 3-tab view ─────────────────────────────────────────
+    if (tunableParams.length === 2 && structuringResult && param1CurveData) {
+      const p1 = tunableParams[0]
+      const p2 = tunableParams[1]
+      const { rows, count_thresholds, cap, total_entities, clean_entities } = structuringResult
+      const allVals = rows.flatMap(r => count_thresholds.map(c => r.counts[String(c)] ?? 0))
+      const maxVal = Math.max(...allVals, 1)
+      const matHeatCell = (v) => {
+        const t = v / maxVal
+        return { background: `rgba(251,191,36,${(t * 0.8).toFixed(2)})`, color: t > 0.6 ? '#92400e' : '#475569', fontWeight: t > 0.7 ? '600' : '400' }
+      }
+      // For param 2 chart: read first row of matrix (min amount threshold) for count sensitivity
+      const countSensData = count_thresholds.map(c => ({ count: c, entities: rows[0]?.counts[String(c)] ?? 0 }))
+      const cntMax = Math.max(...countSensData.map(d => d.entities), 1)
+      const cntHeat = (v) => {
+        const t = v / cntMax
+        return { background: `rgba(251,191,36,${(t * 0.8).toFixed(2)})`, color: t > 0.6 ? '#92400e' : '#475569', fontWeight: t > 0.7 ? '600' : '400' }
+      }
+      const tabLabels = [p1.label || 'Parameter 1', p2.label || 'Parameter 2', '2D Matrix']
+      return (
+        <div className="space-y-5">
+          <div className="flex items-center gap-0 border-b border-slate-200">
+            {tabLabels.map((label, idx) => (
+              <button key={idx} onClick={() => setTwoParamTab(idx)}
+                className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px
+                  ${twoParamTab === idx ? 'border-teal-600 text-teal-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+                {label}
+              </button>
+            ))}
+            <div className="ml-auto pb-2 text-xs text-slate-400">
+              {clean_entities?.toLocaleString()} qualifying entities · cap {fmtCurrency(cap)}
+            </div>
+          </div>
+
+          {twoParamTab === 0 && (
+            <div className="space-y-4">
+              <p className="text-xs text-slate-500">Sensitivity to <strong>{p1.label}</strong> — sweep from {p1.sweep_from} to {p1.sweep_to}</p>
+              {renderSensitivityCharts(param1CurveData)}
+            </div>
+          )}
+
+          {twoParamTab === 1 && (
+            <div className="space-y-4">
+              <p className="text-xs text-slate-500">Sensitivity to <strong>{p2.label}</strong> at min amount ≥ {fmtCurrency(rows[0]?.amount_threshold)}</p>
+              <div className="bg-white border border-slate-200 rounded-xl pt-5 px-5 pb-4">
+                <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Qualifying entities by {p2.label}</p>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={countSensData} margin={{ left: 10, right: 24, bottom: 18 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                    <XAxis dataKey="count" tick={{ fontSize: 11 }} tickFormatter={v => `≥${v}`}
+                      label={{ value: p2.label, position: 'insideBottom', offset: -10, fontSize: 10, fill: '#94a3b8' }} />
+                    <YAxis tick={{ fontSize: 11 }} width={50} />
+                    <Tooltip formatter={(v, n) => [v.toLocaleString(), 'Entities']} labelFormatter={v => `${p2.label} ≥ ${v}`} />
+                    <Bar dataKey="entities" fill="#0d9488" radius={[3,3,0,0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+                <div className="mt-2" style={{ paddingLeft: 60, paddingRight: 24 }}>
+                  <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
+                    <thead><tr>{countSensData.map(d => (
+                      <th key={d.count} className="text-center border border-slate-100 py-0.5" style={{ fontSize: 9, color: '#94a3b8', fontWeight: 500 }}>≥{d.count}</th>
+                    ))}</tr></thead>
+                    <tbody><tr>{countSensData.map(d => (
+                      <td key={d.count} className="text-center border border-slate-100 py-1"
+                        style={{ ...cntHeat(d.entities), fontSize: 9 }}>
+                        {d.entities.toLocaleString()}
+                      </td>
+                    ))}</tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {twoParamTab === 2 && (
+            <div className="space-y-4">
+              <p className="text-xs text-slate-500">Each cell: entities with ≥N transactions of ≥$X (no transactions ≥ {fmtCurrency(cap)})</p>
+              <div className="overflow-x-auto">
+                <table className="text-xs border-collapse w-full">
+                  <thead>
+                    <tr>
+                      <th className="px-3 py-2 text-left text-slate-500 font-semibold border border-slate-200 bg-slate-50 whitespace-nowrap">
+                        {p1.label} ↓<br /><span className="font-normal text-[10px]">{p2.label} →</span>
+                      </th>
+                      {count_thresholds.map(c => (
+                        <th key={c} className="px-3 py-2 text-center text-slate-600 font-semibold border border-slate-200 bg-slate-50 whitespace-nowrap">≥{c}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row, ri) => (
+                      <tr key={ri}>
+                        <td className="px-3 py-2 font-semibold text-slate-700 border border-slate-200 bg-slate-50 whitespace-nowrap">≥{fmtCurrency(row.amount_threshold)}</td>
+                        {count_thresholds.map(c => {
+                          const v = row.counts[String(c)] ?? 0
+                          return (
+                            <td key={c} className="px-3 py-2.5 text-center border border-slate-200 font-medium tabular-nums" style={matHeatCell(v)}>
+                              {v.toLocaleString()}
+                            </td>
+                          )
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex items-center gap-3 text-[10px] text-slate-400">
+                <span>Heat: higher entity count</span>
+                <div className="flex items-center gap-1">
+                  {[0.1, 0.3, 0.5, 0.7, 0.9].map(t => (
+                    <div key={t} className="w-5 h-3 rounded-sm border border-slate-200" style={{ background: `rgba(251,191,36,${(t * 0.8).toFixed(2)})` }} />
+                  ))}
+                  <span className="ml-1">more entities →</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-between">
+            <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">← Back</button>
+          </div>
+        </div>
+      )
+    }
+
     if (!analysisResult) return null
     const { stats, tranches, cdf, categorical } = analysisResult
     const { events = [], raw_transactions = [], raw_columns = [], agg_key_col, analysis_type, tid_col } = analysisResult
@@ -1422,90 +2131,7 @@ export default function ThresholdSetting() {
                 </div>
               </div>
 
-              {/* ── Full-range alert-count line chart (P50–P100 from server) ── */}
-              {(() => {
-                const lineData = (simCurveData || []).slice().reverse().map(pt => ({
-                  pct: pt.pct,
-                  alerts: pt.alerts,
-                  threshold: pt.threshold,
-                }))
-                // deltaData: alerts gained by lowering the threshold one step (going P100→P50)
-                const deltaData = lineData.slice(0, -1).map((pt, i) => ({
-                  pct: pt.pct,
-                  drop: lineData[i + 1].alerts - pt.alerts,
-                }))
-                const yFmt = v => v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(v)
-                if (lineData.length < 2) return null
-                return (
-                  <div className="space-y-4">
-                    {/* Line chart: expected alerts by percentile */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5">
-                      <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-4">Expected alerts by threshold (P100–P50)</p>
-                      <ResponsiveContainer width="100%" height={220}>
-                        <LineChart syncId="sim-curve" data={lineData} margin={{ left: 10, right: 24, bottom: 18 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                          <XAxis dataKey="pct" type="number" domain={[100, 50]} reversed tick={{ fontSize: 11 }}
-                            tickFormatter={v => `P${v}`}
-                            label={{ value: 'Percentile', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#94a3b8' }} />
-                          <YAxis tick={{ fontSize: 11 }} width={50} tickFormatter={yFmt} />
-                          <Tooltip
-                            content={({ active, payload }) => {
-                              if (!active || !payload?.length) return null
-                              const d = payload[0].payload
-                              return (
-                                <div className="bg-white border border-slate-200 rounded-lg shadow-sm px-3 py-2 text-xs">
-                                  <p className="font-semibold text-slate-700 mb-1">P{d.pct}</p>
-                                  <p className="text-teal-700">{d.alerts.toLocaleString()} alerts</p>
-                                  <p className="text-slate-400">{fmtFull(d.threshold)}</p>
-                                </div>
-                              )
-                            }}
-                          />
-                          <Line type="monotone" dataKey="alerts" stroke="#0d9488" strokeWidth={2} dot={false} />
-                          {simResult.results.map(r => {
-                            const pct = r.events_pct != null ? Math.round((100 - r.events_pct) * 10) / 10 : null
-                            return pct != null && pct >= 50 ? (
-                              <ReferenceLine key={r.threshold} x={pct} stroke="#f59e0b" strokeDasharray="4 3"
-                                label={{ value: fmtCurrency(r.threshold), fill: '#d97706', fontSize: 10, position: 'insideTopRight' }} />
-                            ) : null
-                          })}
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </div>
-                    {/* Area chart: drop in alerts per percentile step */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5">
-                      <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide mb-1">Change in alerts per percentile step</p>
-                      <p className="text-xs text-slate-400 mb-4">Alerts gained by lowering the threshold one step</p>
-                      <ResponsiveContainer width="100%" height={160}>
-                        <AreaChart syncId="sim-curve" data={deltaData} margin={{ left: 10, right: 24, bottom: 18 }}>
-                          <defs>
-                            <linearGradient id="dropGrad" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#0d9488" stopOpacity={0.25} />
-                              <stop offset="95%" stopColor="#0d9488" stopOpacity={0.02} />
-                            </linearGradient>
-                          </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                          <XAxis dataKey="pct" type="number" domain={[100, 50]} reversed tick={{ fontSize: 11 }}
-                            tickFormatter={v => `P${v}`}
-                            label={{ value: 'Percentile', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#94a3b8' }} />
-                          <YAxis tick={{ fontSize: 11 }} width={50} tickFormatter={yFmt} />
-                          <Tooltip
-                            formatter={v => [v.toLocaleString(), 'Alerts at this step']}
-                            labelFormatter={v => `P${v}`} />
-                          <Area type="monotone" dataKey="drop" stroke="#0d9488" strokeWidth={1.5}
-                            fill="url(#dropGrad)" />
-                          {simResult.results.map(r => {
-                            const pct = r.events_pct != null ? Math.round((100 - r.events_pct) * 10) / 10 : null
-                            return pct != null && pct >= 50 ? (
-                              <ReferenceLine key={r.threshold} x={pct} stroke="#f59e0b" strokeDasharray="4 3" />
-                            ) : null
-                          })}
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-                )
-              })()}
+              {simCurveData && renderSensitivityCharts(simCurveData, simResult?.results || [])}
 
               {simResult.results.length > 1 && (
                 <div className="flex gap-4">
